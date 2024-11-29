@@ -42,7 +42,6 @@ def chunk_data(docs, chunk_size=800, chunk_overlap=50):
     docs = text_splitter.split_documents(docs)
     for i, d in enumerate(docs):
         d.metadata['from'] = 'jacobs podcast'
-        d.metadata['title'] = d.page_content
     return docs
 
 
@@ -108,16 +107,12 @@ def main(vector_store):
     model='gpt-4', 
     temperature=0.7
     )
-    # print(llm.invoke("What model are you?"))
-    # vector_store.as_retriever()
     retriever = vector_store.as_retriever(search_kwargs={"k": 2})
-    # print(retriever.invoke("""I'm Scandinavian and I like to have things very informal and conversational, which means I'll
-    # make an intro. Is that Louis? that how I pronounce it? """))
 
     retriever_tool = create_retriever_tool(
         retriever,
         "podcast_summary",
-        "______INSTRUCTION_________"
+        
     )
 
 
