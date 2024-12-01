@@ -15,3 +15,8 @@ def  answer():
     user_query = data.get('query', 'No query provided')
     answer = assistant_tool.query_response(user_query)
     return jsonify({"message": answer})
+
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
