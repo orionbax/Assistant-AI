@@ -9,6 +9,8 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain.tools.retriever import create_retriever_tool
 from langchain.prompts import PromptTemplate
+from tiktoken import encoding_for_model
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Load environment variables
 load_dotenv()
@@ -69,6 +71,13 @@ INSTRUCTIONS = """
     4. Podcast responses should be direct answers referencing only the retrieved content
 """
 
+DIMENSION = 3072
+CHUNK_SIZE = 800 
+CHUNK_OVERLAP = 50
+MAX_QUERY_TOKENS = 6000
+MODEL_NAME = "gpt-4"
+EMBEDDING_MODEL = "text-embedding-3-large"
+
 class AssistantTool:
     def __init__(self):
         """Initialize the AssistantTool with necessary configurations."""
@@ -90,32 +99,35 @@ class AssistantTool:
         self.index_name = 'master'
         self.embeddings = OpenAIEmbeddings(
             api_key=os.getenv("OPENAI_API_KEY"),
-            model='text-embedding-3-large'
+            model=EMBEDDING_MODEL
         )
-        self.index = self.get_index(self.index_name)
+        self.index = self._get_index(self.index_name)
         self.vector_store = PineconeVectorStore(
             index=self.index, 
             embedding=self.embeddings
         )
         self.llm = ChatOpenAI(
             api_key=os.getenv("OPENAI_API_KEY"),
-            model='gpt-4',
-            temperature=0.7,
-            max_tokens=None
+            model=MODEL_NAME,
+            temperature=0.7
         )
 
-    def get_index(self, index_name):
-        """Get or create a Pinecone index."""
-        if index_name not in self.pinecone.list_indexes().names():
-            self.pinecone.create_index(
-                name=index_name,
-                dimension=3072,
-                metric='cosine',
-                spec=ServerlessSpec(cloud='aws', region='us-east-1')
-            )
-        return self.pinecone.Index(index_name)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    def _get_index(self, index_name):
+        """Get or create a Pinecone index with retries."""
+        try:
+            if index_name not in self.pinecone.list_indexes().names():
+                self.pinecone.create_index(
+                    name=index_name,
+                    dimension=DIMENSION,
+                    metric='cosine',
+                    spec=ServerlessSpec(cloud='aws', region='us-east-1')
+                )
+            return self.pinecone.Index(index_name)
+        except Exception as e:
+            raise RuntimeError(f"Failed to get or create Pinecone index: {str(e)}")
 
-    def chunk_data(self, docs, chunk_size=800, chunk_overlap=50):
+    def chunk_data(self, docs, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP):
         """Split documents into chunks."""
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size, 
@@ -161,7 +173,7 @@ class AssistantTool:
 
             index = self.pinecone.Index(index_name)
             query_response = index.query(
-                vector=[0] * 3072,
+                vector=[0] * DIMENSION,
                 top_k=10000,
                 namespace=namespace
             )
@@ -204,7 +216,7 @@ class AssistantTool:
         corousels_retriever = self.vector_store.as_retriever(
             search_kwargs={
                 "k": 4,
-                "namespace": "corousel"
+                "namespace": "carousel"
             }
         )
         podcast_retriever = self.vector_store.as_retriever(
@@ -239,23 +251,20 @@ class AssistantTool:
     def query_response(self, query):
         """Process a query and return the response in JSON format."""
         try:
-            # Truncate the input to fit within the model's context length
-            max_tokens = 8192
-            # Assume some tokens are reserved for the response
-            reserved_tokens = 500
-            max_input_tokens = max_tokens - reserved_tokens
-
-            # Truncate the query if necessary
-            if len(query) > max_input_tokens:
-                query = query[:max_input_tokens]
-
-            result = self.agent_executor.invoke({'input': query})
-            return result['output']
+            encoder = encoding_for_model(MODEL_NAME)
+            try:
+                query_tokens = len(encoder.encode(query))
+                if query_tokens > MAX_QUERY_TOKENS:
+                    query = encoder.decode(encoder.encode(query)[:MAX_QUERY_TOKENS])
+            except Exception as e:
+                print(f"Warning: Token counting failed: {e}")
+            
+            return self.agent_executor.invoke({'input': query})['output']
         except Exception as e:
             print(f"Error processing query: {e}")
             return {
                 "type": "error",
-                "answer": f"An error occurred: {str(e)}"
+                "answer": "Irrelevant question"
             }
 
     def test_retrieval(self, query, content_type):
@@ -327,17 +336,41 @@ class AssistantTool:
             print(f"Error listing indices: {e}")
             return []
 
+    def __del__(self):
+        """Cleanup method to ensure proper resource handling."""
+        try:
+            # Clean up any open connections or resources
+            if hasattr(self, 'index'):
+                del self.index
+            if hasattr(self, 'pinecone'):
+                del self.pinecone
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+
 # Example usage
 if __name__ == "__main__":
     assistant_tool = AssistantTool()
-    # assistant_tool.list_indices()
+    assistant_tool.list_indices()
     # assistant_tool.add_vector_to_index('transcripts', 'master', 'podcast')
-    assistant_tool.add_vector_to_index('corousels_txt', 'master', 'corousel')
+    # assistant_tool.add_vector_to_index('carousel', 'master', 'carousel')
     # print(assistant_tool.test_retrieval('What is the main topic of the podcasts?', 'podcast'))
-    # run = True
-    # while run:
-    #     query = input('Enter: ')
-    #     if query == 'q':
-    #         run = False
-    #     else:
-    #         print(assistant_tool.query_response(query))
+    run = True
+    while run:
+        query = input('Enter: ')
+        if query == 'q':
+            run = False
+        else:
+            print(assistant_tool.query_response(query))
+
+
+
+# what did i do today:
+# 1, Solved the issue i had earlier with using different vector databases for different types of data
+# The problem was that the retrievers were not working as expected, and i had to change the namespace in the search kwargs
+# This worked fine but if i wanted to add more data to the vector database in the future, i would risk corrupting not only one
+# but both vector databases
+# This will allow us to safely add to and remove from a vector store with minimal risk of corrupting the other vector store
+# Refined the instructions
+# Made the response in json format to make it easier for the frontend to handle
+# the prompt system is now ready, i made it with flask and i will be sharing the code on the repository
+# Give it a test and send me 
