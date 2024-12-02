@@ -15,36 +15,46 @@ load_dotenv()
 
 # Constants
 INSTRUCTIONS = """
-    If you're asked about content generation, LinkedIn, or things that have to do with social media, keep the following in mind:
-    - You should not answer any inquiries out of your scope.
-    - You are here to assist with generating new content for the provided topic, assume the content is for LinkedIn.
-    - The new content should somewhat reflect styles of the previous posts.
-    - Adhere to the following principles and guidelines when you proceed:
-      - Tone: Conversational, relatable, empathetic, and human. Avoid robotic or overly technical language.
-      - Voice: Authoritative yet approachable, focused on problem-solving and building connections.
-      - Avoid: Jargon, emojis, and gimmicks.
-      - Use a clear structure: Start with a hook, and end with actionable insights.
-      - Decent amount of paragraphs, bullet points, and headings for readability.
-      - Always provide a capturing caption.
-      - Balance storytelling with actionable information.
-      - Focus on relatable, audience-centered content.
-      - Use simple, clear, and direct language. Prioritize empathy and relatability.
-      - Avoid: Buzzwords, clichés, and overused phrases.
-      - Use concise, impactful phrasing.
-      - Keep sentences short for intros and conclusions.
-      - Core Values: Clear communication that addresses audience needs and pain points.
-      - Positioning: Emphasize leadership, versatility, and strong audience connections.
-      - Do's: Address audience pain points and offer solutions.
-      - Don'ts: Avoid redundancy or filler content.
-      - Follow a storytelling framework: Hook - Problem - Solution - Call to Action.
-      - Creative Freedom: You can experiment with tones/styles if relatable.
-      - Defined Parameters: Ensure tone is empathetic, simple, and authentic. Stay audience-focused without being overly promotional.
+    You are an AI assistant that generates content in two different formats depending on the query type.
 
-    For podcast-related queries:
-    - Summarize the podcast content succinctly.
-    - Highlight key points and insights from the podcast.
-    - Provide a brief overview of the podcast's theme and any notable guests or discussions.
-    - Use a similar tone and style as above, focusing on clarity and engagement.
+    For social media content (carousel type):
+    - Maintain a professional yet conversational tone
+    - Focus on value and actionable insights
+    - Keep content concise and engaging
+    - Use clear structure and formatting
+    - Avoid jargon and buzzwords
+    - Ensure content reflects previous post styles
+    Response structure for carousel content:
+    {{
+        "type": "carousel",
+        "topic": "Main topic title",
+        "paragraph": "Introduction paragraph that sets the context",
+        "body": [
+            {{
+                "sub_topics": "Subtitle 1",
+                "content": "Content for subtitle 1"
+            }},
+            {{
+                "sub_topics": "Subtitle 2",
+                "content": "Content for subtitle 2"
+            }}
+        ],
+        "summary": "A concise summary of the entire content",
+        "caption": "An engaging caption for social media",
+        "description": "A brief description of the content",
+        "hashtags": ["#Relevant", "#Hashtags", "#ForTheContent"]
+    }}
+
+    For podcast content:
+    - ONLY answer using information from the retrieved podcast documents
+    - Provide direct, concise answers based on the podcast content
+    - Do not make up or add information that isn't in the retrieved documents
+    - If no podcast documents are found, respond with an error message
+    Response structure for podcast content:
+    {{
+        "type": "podcast",
+        "answer": "Direct answer from podcast content"
+    }}
 
     Context so far:
     {agent_scratchpad}
@@ -52,7 +62,11 @@ INSTRUCTIONS = """
     User query:
     {input}
 
-    Respond accordingly based on the above context.
+    Remember:
+    1. For podcast queries, ONLY use information from the retrieved documents
+    2. If no podcast documents are found, return: {{"type": "podcast", "answer": "No relevant podcast content found"}}
+    3. Always include the "type" field: "carousel" for content generation, "podcast" for podcast queries
+    4. Podcast responses should be direct answers referencing only the retrieved content
 """
 
 class AssistantTool:
@@ -72,8 +86,8 @@ class AssistantTool:
 
     def _initialize_components(self):
         """Initialize Pinecone, embeddings, and other components."""
-        self.pinecone = Pinecone(api_key=os.getenv("PINECONE_DEFAULT_API_KEY_ATHEM"))
-        self.index_name = "corousels2"
+        self.pinecone = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+        self.index_name = 'master'
         self.embeddings = OpenAIEmbeddings(
             api_key=os.getenv("OPENAI_API_KEY"),
             model='text-embedding-3-large'
@@ -125,7 +139,7 @@ class AssistantTool:
         uuids = [str(uuid4()) for _ in range(len(documents))]
         index = self.get_index(index)
         vector_store = PineconeVectorStore(index=index, embedding=self.embeddings)
-        vector_store.add_documents(documents=documents, ids=uuids)
+        vector_store.add_documents(documents=documents, ids=uuids, namespace=namespace)
         print("Data loading completed!")
 
     def delete_index_content(self, index_name):
@@ -149,7 +163,6 @@ class AssistantTool:
             query_response = index.query(
                 vector=[0] * 3072,
                 top_k=10000,
-                include_metadata=True,
                 namespace=namespace
             )
             
@@ -187,12 +200,18 @@ class AssistantTool:
             input_variables=['agent_scratchpad', 'input']
         )
 
-        # Create retrievers with appropriate filters
+        # Updated retrievers without include_metadata argument
         corousels_retriever = self.vector_store.as_retriever(
-            search_kwargs={"k": 4, 'filter': {'namespace': 'corousels'}}
+            search_kwargs={
+                "k": 4,
+                "namespace": "corousel"
+            }
         )
         podcast_retriever = self.vector_store.as_retriever(
-            search_kwargs={"k": 4, 'filter': {'namespace': 'podcast'}}
+            search_kwargs={
+                "k": 4,
+                "namespace": "podcast"
+            }
         )
 
         # Create tools
@@ -218,18 +237,107 @@ class AssistantTool:
         )
 
     def query_response(self, query):
-        """Process a query and return the response."""
+        """Process a query and return the response in JSON format."""
         try:
+            # Truncate the input to fit within the model's context length
+            max_tokens = 8192
+            # Assume some tokens are reserved for the response
+            reserved_tokens = 500
+            max_input_tokens = max_tokens - reserved_tokens
+
+            # Truncate the query if necessary
+            if len(query) > max_input_tokens:
+                query = query[:max_input_tokens]
+
             result = self.agent_executor.invoke({'input': query})
             return result['output']
         except Exception as e:
             print(f"Error processing query: {e}")
-            return "I apologize, but I encountered an error processing your request. Please try again."
+            return {
+                "type": "error",
+                "answer": f"An error occurred: {str(e)}"
+            }
+
+    def test_retrieval(self, query, content_type):
+        """
+        Test retrieval functionality for podcast or carousel content.
+        
+        Args:
+            query (str): The search query
+            content_type (str): Either 'podcast' or 'carousel'
+            
+        Returns:
+            dict: Retrieved documents and their metadata
+        """
+        try:
+            # Validate content type
+            if content_type not in ['podcast', 'carousel']:
+                raise ValueError("content_type must be either 'podcast' or 'carousel'")
+
+            # Updated retriever without type filter
+            retriever = self.vector_store.as_retriever(
+                search_kwargs={
+                    "k": 4,
+                    "namespace": content_type,
+                }
+            )
+
+            # Get documents
+            docs = retriever.invoke(query)
+            
+            # Format results
+            results = {
+                "query": query,
+                "content_type": content_type,
+                "num_docs_found": len(docs),
+                "documents": []
+            }
+            
+            # Add each document's content and metadata
+            for i, doc in enumerate(docs, 1):
+                results["documents"].append({
+                    "document_number": i,
+                    "content": doc.page_content,
+                    "metadata": doc.metadata
+                })
+
+            return results
+
+        except Exception as e:
+            return {
+                "error": str(e),
+                "query": query,
+                "content_type": content_type,
+                "num_docs_found": 0,
+                "documents": []
+            }
+
+    def list_indices(self):
+        """List all indices in the Pinecone vector store."""
+        try:
+            indices = self.pinecone.list_indexes().names()
+            if not indices:
+                print("No indices found in the vector store.")
+            else:
+                print("Indices in the vector store:")
+                for index in indices:
+                    print(f"- {index}")
+            return indices
+        except Exception as e:
+            print(f"Error listing indices: {e}")
+            return []
 
 # Example usage
 if __name__ == "__main__":
     assistant_tool = AssistantTool()
-    # assistant_tool.show_index_content('corousels2')
-    main_index_name = 'master'
-    assistant_tool.add_vector_to_index('corousels_txt', main_index_name, 'corousel')
-    assistant_tool.add_vector_to_index('transcripts', main_index_name, 'podcast')
+    # assistant_tool.list_indices()
+    # assistant_tool.add_vector_to_index('transcripts', 'master', 'podcast')
+    assistant_tool.add_vector_to_index('corousels_txt', 'master', 'corousel')
+    # print(assistant_tool.test_retrieval('What is the main topic of the podcasts?', 'podcast'))
+    # run = True
+    # while run:
+    #     query = input('Enter: ')
+    #     if query == 'q':
+    #         run = False
+    #     else:
+    #         print(assistant_tool.query_response(query))
