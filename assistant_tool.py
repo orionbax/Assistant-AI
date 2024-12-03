@@ -22,13 +22,14 @@ INSTRUCTIONS = """
     For social media content (carousel type):
     - Maintain a professional yet conversational tone
     - Focus on value and actionable insights
-    - Keep content concise and engaging
+    - Keep content detailed and engaging
     - Use clear structure and formatting
     - Avoid jargon and buzzwords
     - Ensure content reflects previous post styles
     Response structure for carousel content:
     {{
         "type": "carousel",
+ 
         "topic": "Main topic title",
         "paragraph": "Introduction paragraph that sets the context",
         "body": [
@@ -49,7 +50,7 @@ INSTRUCTIONS = """
 
     For podcast content:
     - ONLY answer using information from the retrieved podcast documents
-    - Provide direct, concise answers based on the podcast content
+    - Provide detailed answers based on the podcast content
     - Do not make up or add information that isn't in the retrieved documents
     - If no podcast documents are found, respond with an error message
     Response structure for podcast content:
@@ -363,14 +364,3 @@ if __name__ == "__main__":
             print(assistant_tool.query_response(query))
 
 
-
-# what did i do today:
-# 1, Solved the issue i had earlier with using different vector databases for different types of data
-# The problem was that the retrievers were not working as expected, and i had to change the namespace in the search kwargs
-# This worked fine but if i wanted to add more data to the vector database in the future, i would risk corrupting not only one
-# but both vector databases
-# This will allow us to safely add to and remove from a vector store with minimal risk of corrupting the other vector store
-# Refined the instructions
-# Made the response in json format to make it easier for the frontend to handle
-# the prompt system is now ready, i made it with flask and i will be sharing the code on the repository
-# Give it a test and send me 
