@@ -65,6 +65,9 @@ INSTRUCTIONS = """
         "answer": "I am a specialized assistant focused only on social media carousel content and podcast information. I cannot help with [specific topic]. Please ask questions related to social media carousel content creation or podcast information."
     }}
 
+    Previous conversation history:
+    {conversation_history}
+
     Context so far:
     {agent_scratchpad}
 
@@ -93,6 +96,7 @@ class AssistantTool:
         self._initialize_components()
         self.agent_executor = None
         self.get_executor()
+        self.conversation_history = []  # Initialize conversation history
 
     def _validate_env_vars(self):
         """Validate required environment variables are present."""
@@ -185,6 +189,21 @@ class AssistantTool:
         except Exception as e:
             raise RuntimeError(f"Error retrieving index content: {e}")
 
+    def format_conversation_history(self):
+        """Format conversation history for the prompt."""
+        if not self.conversation_history:
+            return "No previous conversation."
+        
+        formatted_history = []
+        for i, exchange in enumerate(self.conversation_history[-3:], 1):  # Only use last 3 exchanges
+            formatted_history.extend([
+                f"Exchange {i}:",
+                f"User: {exchange['user_input']}",
+                f"Assistant: {exchange['response']}",
+                ""
+            ])
+        return "\n".join(formatted_history)
+
     def get_executor(self):
         """Initialize the agent executor with necessary tools."""
         if self.agent_executor:
@@ -192,7 +211,7 @@ class AssistantTool:
 
         prompt = PromptTemplate(
             template=INSTRUCTIONS, 
-            input_variables=['agent_scratchpad', 'input']
+            input_variables=['agent_scratchpad', 'input', 'conversation_history']
         )
 
         # Updated retrievers without include_metadata argument
@@ -226,10 +245,21 @@ class AssistantTool:
         agent = create_tool_calling_agent(self.llm, tools, prompt)
         self.agent_executor = AgentExecutor(
             agent=agent, 
-            verbose=False, 
+            verbose=True, 
             tools=tools, 
             max_iterations=25
         )
+
+    def add_to_history(self, user_input, response):
+        """Add a user query and response to the conversation history."""
+        self.conversation_history.append({
+            "user_input": user_input,
+            "response": response
+        })
+
+    def get_conversation_history(self):
+        """Retrieve the conversation history."""
+        return self.conversation_history
 
     def query_response(self, query):
         """Process a query and return the response in JSON format."""
@@ -242,11 +272,20 @@ class AssistantTool:
             except Exception as e:
                 pass
             
-            return self.agent_executor.invoke({'input': query})['output']
+            # Include conversation history in the context
+            conversation_history = self.format_conversation_history()
+            response = self.agent_executor.invoke({
+                'input': query,
+                'conversation_history': conversation_history
+            })['output']
+            
+            self.add_to_history(query, response)  # Add to history
+            print(response)
+            return response
         except Exception as e:
             return {
                 "type": "error",
-                "answer": "Irrelevant question"
+                "answer": f"Error processing query: {str(e)}"
             }
 
     def test_retrieval(self, query, content_type):
@@ -324,19 +363,19 @@ class AssistantTool:
             pass
 
 # # Example usage
-# if __name__ == "__main__":
-#     assistant_tool = AssistantTool()
+if __name__ == "__main__":
+    assistant_tool = AssistantTool()
 #     # print(assistant_tool._get_index('master'))
 #     assistant_tool.add_vector_to_index('transcripts', 'transcripts')
 #     # assistant_tool.add_vector_to_index('carousel', 'master', 'carousel')
 #     # print(assistant_tool.test_retrieval('What is the main topic of the podcasts?', 'podcast'))
-#     # run = True
-#     # while run:
-#     #     query = input('Enter: ')
-#     #     if query == 'q':
-#     #         run = False
-#     #     else:
-#     #         print(assistant_tool.query_response(query))
+    run = True
+    while run:
+        query = input('Enter: ')
+        if query == 'q':
+            run = False
+        else:
+            print(assistant_tool.query_response(query))
 
 
 

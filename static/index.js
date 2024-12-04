@@ -6,6 +6,7 @@ const userInput = document.getElementById('userInput');
 const charCounter = document.getElementById('charCounter');
 const sendButton = document.getElementById('sendButton');
 
+
 userInput.addEventListener('input', function() {
     const length = this.value.length;
     charCounter.textContent = `${length}/${CHAR_LIMIT}`;
@@ -20,6 +21,27 @@ userInput.addEventListener('input', function() {
         charCounter.classList.remove('near-limit', 'at-limit');
     }
 });
+
+// Auto-focus textarea on any keydown when not already focused
+document.addEventListener('keydown', function(event) {
+    // Skip if user is pressing a modifier key
+    if (event.ctrlKey || event.altKey || event.metaKey) {
+        return;
+    }
+    
+    // Skip if current focus is already on textarea
+    if (document.activeElement === userInput) {
+        return;
+    }
+
+    // Skip if user is typing in another input/textarea
+    if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') {
+        return;
+    }
+
+    userInput.focus();
+});
+
 
 function formatTimestamp() {
     return new Date().toLocaleTimeString();
@@ -143,6 +165,7 @@ async function sendMessage() {
             chatContainer.insertAdjacentHTML('beforeend', responseHTML);
             break;
         } catch (error) {
+            console.log(error);
             retries++;
             if (retries === MAX_RETRIES) {
                 loadingDiv.remove();
@@ -168,5 +191,6 @@ document.getElementById('userInput').addEventListener('keypress', function(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
+        document.getElementById('userInput').focus();
     }
 });
