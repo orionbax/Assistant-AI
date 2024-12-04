@@ -16,6 +16,22 @@ document.addEventListener('DOMContentLoaded', function() {
             console.log('Session initialized:', data.user_id);
         })
         .catch(error => console.error('Error initializing session:', error));
+
+    const chatContainer = document.getElementById('chatContainer');
+    const welcomeMessage = document.getElementById('welcomeMessage');
+    
+    // Function to check if there are any chat messages
+    function updateWelcomeMessage() {
+        const messages = chatContainer.getElementsByClassName('message');
+        if (messages.length > 0) {
+            welcomeMessage.style.display = 'none';
+        } else {
+            welcomeMessage.style.display = 'block';
+        }
+    }
+    
+    // Call initially
+    updateWelcomeMessage();
 }); 
 
 userInput.addEventListener('input', function() {
@@ -195,6 +211,9 @@ async function sendMessage() {
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }
     }
+
+    // After adding a new message, update welcome message visibility
+    updateWelcomeMessage();
 }
 
 // Add event listener for Enter key

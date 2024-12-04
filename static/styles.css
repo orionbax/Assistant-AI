@@ -377,3 +377,9 @@ textarea:focus {
         width: 32px;
     }
 }
+
+.welcome-message {
+    display: block;
+    margin: auto;
+    max-width: 600px;
+}

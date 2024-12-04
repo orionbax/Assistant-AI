@@ -13,28 +13,47 @@ from tiktoken import encoding_for_model
 from tenacity import retry, stop_after_attempt, wait_exponential
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from typing import Dict
+import regex
+import json
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 # Load environment variables
 load_dotenv()
 
 # Constants
 INSTRUCTIONS = """
-    You are a specialized AI assistant focused ONLY on two specific types of content:
+    You are a specialized AI assistant that MUST ALWAYS respond in valid JSON format.
+    You are focused ONLY on three specific types of content:
     1. Social media content generation (specifically carousels)
     2. Podcast content retrieval and information
     3. Previous conversation retrieval and information
 
-    If a query is explicitly about previous conversations, provide the information in the specified format below.
-    If a query is outside these three domains, politely explain that you are a specialized assistant 
-    focused only on these topics, and cannot help with other topics.
+    CRITICAL RESPONSE RULES:
+    - You MUST ALWAYS respond with properly formatted JSON
+    - NO additional text before or after the JSON
+    - NO explanations outside the JSON structure
+    - Make maximum TWO tool calls per query
+    - After getting tool responses, format your final answer immediately as JSON
+    - NEVER make additional tool calls after receiving the initial responses
+    - If you are asked to modify the content, DO NOT make any more calls.
 
+    CONTENT GUIDELINES:
     For social media content (carousel type):
     - Maintain a professional yet conversational tone
     - Focus on value and actionable insights
     - Keep content detailed and engaging
     - Use clear structure and formatting
     - Avoid jargon and buzzwords
-    - Ensure content reflects previous post styles
-    Response structure for carousel content:
+    - Try and reflect the style of the previous posts from the provided documents
+
+    For podcast content:
+    - BASE your answer on information from the retrieved podcast documents ONLY
+    - If no podcast documents are found, respond with the no-content JSON response
+    - Keep responses focused and direct
+    - Include relevant quotes or specific references when available
+
+    RESPONSE FORMATS:
+
+    1. For social media carousel content:
     {{
         "type": "carousel",
         "topic": "Main topic title",
@@ -44,7 +63,6 @@ INSTRUCTIONS = """
                 "sub_topics": "Subtitle",
                 "content": "Content for this subtitle"
             }}
-            // Additional sub-topics as needed...
         ],
         "summary": "A concise summary of the entire content",
         "caption": "An engaging caption for social media",
@@ -52,27 +70,41 @@ INSTRUCTIONS = """
         "hashtags": ["#Relevant", "#Hashtags", "#ForTheContent"]
     }}
 
-    For podcast content:
-    - BASE your answer on information from the retrieved podcast documents
-    - Based on the information you have at hand, you are allowed to give thoughts and opinions.
-    - If no podcast documents are found, respond with an error message
-    Response structure for podcast content:
+    2. For podcast content:
     {{
         "type": "podcast",
         "answer": "Direct answer from podcast content"
     }}
 
-    For conversation history queries:
+    3. For conversation history:
     {{
         "type": "error",
         "answer": "Response about conversation history. If no history exists, explain that there are no previous conversations."
     }}
 
-    For out-of-scope queries:
+    4. For errors or out-of-scope queries:
     {{
         "type": "error",
         "answer": "I am a specialized assistant focused only on social media carousel content, podcast information, and conversation history. I cannot help with [specific topic]. Please ask questions related to these topics."
     }}
+
+    5. For content modification requests:
+    - Use the same JSON structure as the original content type
+    - Do not make new tool calls
+    - Modify the existing content while maintaining proper JSON format
+    - Preserve the original style and tone while making requested changes
+
+    STRICT RULES:
+    1. ALWAYS respond with ONE of the above JSON formats
+    2. NEVER include any text outside the JSON structure
+    3. For podcast queries, use ONLY information from the retrieved documents
+    4. If no podcast documents found: {{"type": "podcast", "answer": "No relevant podcast content found"}}
+    5. ALWAYS include the "type" field
+    6. DO NOT attempt to answer questions outside the three focus areas
+    7. Maintain consistent formatting and structure in responses
+    8. For carousel content, always include all required fields
+    9. Keep responses focused and relevant to the query
+    10. Preserve professional tone while remaining engaging
 
     Previous conversation history:
     {conversation_history}
@@ -82,14 +114,6 @@ INSTRUCTIONS = """
 
     User query:
     {input}
-
-    Remember:
-    1. For podcast queries, ONLY use information from the retrieved documents
-    2. If no podcast documents are found, return: {{"type": "podcast", "answer": "No relevant podcast content found"}}
-    3. Always include the "type" field: "carousel" for content generation, "podcast" for podcast queries, "error" for conversation history and out-of-scope queries
-    4. Podcast responses should be direct answers referencing only the retrieved content
-    5. Conversation history responses should clearly indicate if there is no history
-    6. Do not attempt to answer questions outside of social media carousel content, podcast information, and conversation history
 """
 
 DIMENSION = 3072
@@ -100,8 +124,9 @@ MODEL_NAME = "gpt-4"
 EMBEDDING_MODEL = "text-embedding-3-large"
 
 class AssistantTool:
-    def __init__(self):
+    def __init__(self, debug=False):
         """Initialize the AssistantTool with necessary configurations."""
+        self.debug = debug
         self._validate_env_vars()
         self._initialize_components()
         self.agent_executor = None
@@ -118,16 +143,29 @@ class AssistantTool:
     def _initialize_components(self):
         """Initialize Pinecone, embeddings, and other components."""
         self.pinecone = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-        self.index_name = 'master'
+        # Initialize two separate indices
+        self.carousel_index_name = 'carousel'
+        self.podcast_index_name = 'podcast'
+        
         self.embeddings = OpenAIEmbeddings(
             api_key=os.getenv("OPENAI_API_KEY"),
             model=EMBEDDING_MODEL
         )
-        self.index = self._get_index(self.index_name)
-        self.vector_store = PineconeVectorStore(
-            index=self.index, 
+        
+        # Create/get both indices
+        self.carousel_index = self._get_index(self.carousel_index_name)
+        self.podcast_index = self._get_index(self.podcast_index_name)
+        
+        # Create vector stores for both indices
+        self.carousel_vector_store = PineconeVectorStore(
+            index=self.carousel_index, 
             embedding=self.embeddings
         )
+        self.podcast_vector_store = PineconeVectorStore(
+            index=self.podcast_index, 
+            embedding=self.embeddings
+        )
+        
         self.llm = ChatOpenAI(
             api_key=os.getenv("OPENAI_API_KEY"),
             model=MODEL_NAME,
@@ -161,14 +199,18 @@ class AssistantTool:
         """Load documents from a directory."""
         return PyPDFDirectoryLoader(directory).load()
 
-    def add_vector_to_index(self, files_dir, index_name, namespace=""):
-        """Add documents to the vector store."""
-        documents = self.chunk_data(self.read_doc(files_dir))
+    def add_vector_to_index(self, files_dir, content_type):
+        """Add documents to the vector store based on content type."""
+        if content_type not in ['carousel', 'podcast']:
+            raise ValueError("content_type must be either 'carousel' or 'podcast'")
         
+        documents = self.chunk_data(self.read_doc(files_dir))
         uuids = [str(uuid4()) for _ in range(len(documents))]
-        index = self._get_index(index_name)
-        vector_store = PineconeVectorStore(index=index, embedding=self.embeddings)
-        vector_store.add_documents(documents=documents, ids=uuids)
+        
+        if content_type == 'carousel':
+            self.carousel_vector_store.add_documents(documents=documents, ids=uuids)
+        else:  # podcast
+            self.podcast_vector_store.add_documents(documents=documents, ids=uuids)
 
     def delete_index_content(self, index_name):
         """Delete all contents from an index."""
@@ -224,40 +266,39 @@ class AssistantTool:
             input_variables=['agent_scratchpad', 'input', 'conversation_history']
         )
 
-        # Updated retrievers without include_metadata argument
-        corousels_retriever = self.vector_store.as_retriever(
+        # Use separate vector stores for each content type
+        carousel_retriever = self.carousel_vector_store.as_retriever(
             search_kwargs={
-                "k": 4,
-                "namespace": "carousel"
+                "k": 4
             }
         )
-        podcast_retriever = self.vector_store.as_retriever(
+        podcast_retriever = self.podcast_vector_store.as_retriever(
             search_kwargs={
-                "k": 4,
-                "namespace": "podcast"
+                "k": 4
             }
         )
 
-        # Create tools
+        # Create tools with the separate retrievers
         tools = [
             create_retriever_tool(
-                retriever=corousels_retriever,
+                retriever=carousel_retriever,
                 name="social_media_content",
-                description="Use this tool for social media content generation, LinkedIn posts, and content strategy queries"
+                description="Use this tool for social media content generation, LinkedIn posts, and content strategy queries. Make only one call to this tool."
             ),
             create_retriever_tool(
                 retriever=podcast_retriever,
                 name="podcast_content",
-                description="Use this tool for podcast-related queries, summaries, and insights from podcast episodes"
+                description="Use this tool for podcast-related queries, summaries, and insights from podcast episodes. Make only one call to this tool."
             )
         ]
 
         agent = create_tool_calling_agent(self.llm, tools, prompt)
         self.agent_executor = AgentExecutor(
             agent=agent, 
-            verbose=False, 
+            verbose=self.debug,
             tools=tools, 
-            max_iterations=25
+            max_iterations=3,  # Reduced from 25 to 3
+            early_stopping_method="force"  # Force stop after max_iterations
         )
 
     def add_to_history(self, user_id: str, user_input: str, response: str):
@@ -278,6 +319,23 @@ class AssistantTool:
         """Generate a unique user ID."""
         return str(uuid4())
 
+    def clean_ai_response(self, response):
+        # Recursive pattern for JSON-like structures
+        json_like_pattern = r'{(?:[^{}]|(?R))*}'  # Recursive matching of nested braces
+        
+        # Use the regex library to match
+        match = regex.search(json_like_pattern, response)
+        if match:
+            json_text = match.group(0)
+            try:
+                # Validate the extracted text as JSON
+                json.loads(json_text)
+                return json_text
+            except json.JSONDecodeError:
+                pass
+
+        return "{}"  # Return empty JSON if no valid structure found
+
     def query_response(self, query: str, user_id: str):
         """Process a query and return the response in JSON format."""
         try:
@@ -286,17 +344,31 @@ class AssistantTool:
                 query_tokens = len(encoder.encode(query))
                 if query_tokens > MAX_QUERY_TOKENS:
                     query = encoder.decode(encoder.encode(query)[:MAX_QUERY_TOKENS])
-            except Exception as e:
+            except Exception:
                 pass
             
-            # Include user-specific conversation history in the context
-            conversation_history = self.format_conversation_history(user_id)
-            response = self.agent_executor.invoke({
-                'input': query,
-                'conversation_history': conversation_history
-            })['output']
+            # Add a timeout to prevent infinite loops
+            with ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    self.agent_executor.invoke,
+                    {
+                        'input': query,
+                        'conversation_history': self.format_conversation_history(user_id)
+                    }
+                )
+                try:
+                    response = future.result(timeout=180)  # 30 second timeout
+                    response = response['output']
+                    response = self.clean_ai_response(response)
+                    # print(response)
+                    # Extract JSON from response
+                except TimeoutError:
+                    response = {
+                        "type": "error",
+                        "answer": "Request timed out. Please try again with a more specific query."
+                    }
             
-            self.add_to_history(user_id, query, response)  # Add to user-specific history
+            self.add_to_history(user_id, query, response)
             return response
         except Exception as e:
             return {
@@ -305,33 +377,25 @@ class AssistantTool:
             }
 
     def test_retrieval(self, query, content_type):
-        """
-        Test retrieval functionality for podcast or carousel content.
-        
-        Args:
-            query (str): The search query
-            content_type (str): Either 'podcast' or 'carousel'
-            
-        Returns:
-            dict: Retrieved documents and their metadata
-        """
+        """Test retrieval functionality for podcast or carousel content."""
         try:
-            # Validate content type
             if content_type not in ['podcast', 'carousel']:
                 raise ValueError("content_type must be either 'podcast' or 'carousel'")
 
-            # Updated retriever without type filter
-            retriever = self.vector_store.as_retriever(
+            # Use the appropriate vector store based on content type
+            vector_store = (
+                self.podcast_vector_store if content_type == 'podcast' 
+                else self.carousel_vector_store
+            )
+            
+            retriever = vector_store.as_retriever(
                 search_kwargs={
-                    "k": 4,
-                    "namespace": content_type,
+                    "k": 4
                 }
             )
 
-            # Get documents
             docs = retriever.invoke(query)
             
-            # Format results
             results = {
                 "query": query,
                 "content_type": content_type,
@@ -339,7 +403,6 @@ class AssistantTool:
                 "documents": []
             }
             
-            # Add each document's content and metadata
             for i, doc in enumerate(docs, 1):
                 results["documents"].append({
                     "document_number": i,
@@ -362,8 +425,6 @@ class AssistantTool:
         """List all indices in the Pinecone vector store."""
         try:
             indices = self.pinecone.list_indexes()
-            indices = [index.name for index in indices]
-            print(indices)
             indices = [index.name for index in indices if index.name in ['carousel', 'podcast']]
             return indices
         except Exception as e:
@@ -383,19 +444,19 @@ class AssistantTool:
 # # Example usage
 if __name__ == "__main__":
     assistant_tool = AssistantTool()
-    print(assistant_tool.list_indices())
+    # print(assistant_tool.list_indices())
 #     # print(assistant_tool._get_index('master'))
 #     assistant_tool.add_vector_to_index('transcripts', 'transcripts')
-#     # assistant_tool.add_vector_to_index('carousel', 'master', 'carousel')
+    # assistant_tool.add_vector_to_index('corousels_txt', 'carousel')
 #     # print(assistant_tool.test_retrieval('What is the main topic of the podcasts?', 'podcast'))
-    # run = True
-    # test_user_id = input("enter your key: ")  # Example user ID for testing
-    # while run:
-    #     query = input('Enter: ')
-    #     if query == 'q':
-    #         run = False
-    #     else:
-    #         print(assistant_tool.query_response(query, test_user_id))
+    run = True
+    test_user_id = input("enter your key: ")  # Example user ID for testing
+    while run:
+        query = input('Enter: ')
+        if query == 'q':
+            run = False
+        else:
+            print(assistant_tool.query_response(query, test_user_id))
 
 
 
