@@ -12,6 +12,7 @@ from langchain.prompts import PromptTemplate
 from tiktoken import encoding_for_model
 from tenacity import retry, stop_after_attempt, wait_exponential
 from langchain_community.document_loaders import PyPDFDirectoryLoader
+from typing import Dict
 # Load environment variables
 load_dotenv()
 
@@ -20,9 +21,11 @@ INSTRUCTIONS = """
     You are a specialized AI assistant focused ONLY on two specific types of content:
     1. Social media content generation (specifically carousels)
     2. Podcast content retrieval and information
+    3. Previous conversation retrieval and information
 
-    If a query is outside these two domains, politely explain that you are a specialized assistant 
-    focused only on social media carousel content and podcast information, and cannot help with other topics.
+    If a query is explicitly about previous conversations, provide the information in the specified format below.
+    If a query is outside these three domains, politely explain that you are a specialized assistant 
+    focused only on these topics, and cannot help with other topics.
 
     For social media content (carousel type):
     - Maintain a professional yet conversational tone
@@ -51,7 +54,7 @@ INSTRUCTIONS = """
 
     For podcast content:
     - BASE your answer on information from the retrieved podcast documents
-    - Do not make up or add information that isn't in the retrieved documents
+    - Based on the information you have at hand, you are allowed to give thoughts and opinions.
     - If no podcast documents are found, respond with an error message
     Response structure for podcast content:
     {{
@@ -59,10 +62,16 @@ INSTRUCTIONS = """
         "answer": "Direct answer from podcast content"
     }}
 
+    For conversation history queries:
+    {{
+        "type": "error",
+        "answer": "Response about conversation history. If no history exists, explain that there are no previous conversations."
+    }}
+
     For out-of-scope queries:
     {{
         "type": "error",
-        "answer": "I am a specialized assistant focused only on social media carousel content and podcast information. I cannot help with [specific topic]. Please ask questions related to social media carousel content creation or podcast information."
+        "answer": "I am a specialized assistant focused only on social media carousel content, podcast information, and conversation history. I cannot help with [specific topic]. Please ask questions related to these topics."
     }}
 
     Previous conversation history:
@@ -77,9 +86,10 @@ INSTRUCTIONS = """
     Remember:
     1. For podcast queries, ONLY use information from the retrieved documents
     2. If no podcast documents are found, return: {{"type": "podcast", "answer": "No relevant podcast content found"}}
-    3. Always include the "type" field: "carousel" for content generation, "podcast" for podcast queries, "error" for out-of-scope queries
+    3. Always include the "type" field: "carousel" for content generation, "podcast" for podcast queries, "error" for conversation history and out-of-scope queries
     4. Podcast responses should be direct answers referencing only the retrieved content
-    5. Do not attempt to answer questions outside of social media carousel content and podcast information
+    5. Conversation history responses should clearly indicate if there is no history
+    6. Do not attempt to answer questions outside of social media carousel content, podcast information, and conversation history
 """
 
 DIMENSION = 3072
@@ -96,7 +106,7 @@ class AssistantTool:
         self._initialize_components()
         self.agent_executor = None
         self.get_executor()
-        self.conversation_history = []  # Initialize conversation history
+        self.conversation_histories: Dict[str, list] = {}
 
     def _validate_env_vars(self):
         """Validate required environment variables are present."""
@@ -189,13 +199,13 @@ class AssistantTool:
         except Exception as e:
             raise RuntimeError(f"Error retrieving index content: {e}")
 
-    def format_conversation_history(self):
-        """Format conversation history for the prompt."""
-        if not self.conversation_history:
+    def format_conversation_history(self, user_id: str) -> str:
+        """Format conversation history for the prompt for a specific user."""
+        if user_id not in self.conversation_histories or not self.conversation_histories[user_id]:
             return "No previous conversation."
         
         formatted_history = []
-        for i, exchange in enumerate(self.conversation_history[-3:], 1):  # Only use last 3 exchanges
+        for i, exchange in enumerate(self.conversation_histories[user_id][-3:], 1):  # Only use last 3 exchanges
             formatted_history.extend([
                 f"Exchange {i}:",
                 f"User: {exchange['user_input']}",
@@ -245,23 +255,30 @@ class AssistantTool:
         agent = create_tool_calling_agent(self.llm, tools, prompt)
         self.agent_executor = AgentExecutor(
             agent=agent, 
-            verbose=True, 
+            verbose=False, 
             tools=tools, 
             max_iterations=25
         )
 
-    def add_to_history(self, user_input, response):
-        """Add a user query and response to the conversation history."""
-        self.conversation_history.append({
+    def add_to_history(self, user_id: str, user_input: str, response: str):
+        """Add a user query and response to the conversation history for a specific user."""
+        if user_id not in self.conversation_histories:
+            self.conversation_histories[user_id] = []
+            
+        self.conversation_histories[user_id].append({
             "user_input": user_input,
             "response": response
         })
 
-    def get_conversation_history(self):
-        """Retrieve the conversation history."""
-        return self.conversation_history
+    def get_conversation_history(self, user_id: str) -> list:
+        """Retrieve the conversation history for a specific user."""
+        return self.conversation_histories.get(user_id, [])
 
-    def query_response(self, query):
+    def generate_user_id(self) -> str:
+        """Generate a unique user ID."""
+        return str(uuid4())
+
+    def query_response(self, query: str, user_id: str):
         """Process a query and return the response in JSON format."""
         try:
             encoder = encoding_for_model(MODEL_NAME)
@@ -272,15 +289,14 @@ class AssistantTool:
             except Exception as e:
                 pass
             
-            # Include conversation history in the context
-            conversation_history = self.format_conversation_history()
+            # Include user-specific conversation history in the context
+            conversation_history = self.format_conversation_history(user_id)
             response = self.agent_executor.invoke({
                 'input': query,
                 'conversation_history': conversation_history
             })['output']
             
-            self.add_to_history(query, response)  # Add to history
-            print(response)
+            self.add_to_history(user_id, query, response)  # Add to user-specific history
             return response
         except Exception as e:
             return {
@@ -347,6 +363,8 @@ class AssistantTool:
         try:
             indices = self.pinecone.list_indexes()
             indices = [index.name for index in indices]
+            print(indices)
+            indices = [index.name for index in indices if index.name in ['carousel', 'podcast']]
             return indices
         except Exception as e:
             print(f"Error listing indices: {e}")
@@ -365,17 +383,19 @@ class AssistantTool:
 # # Example usage
 if __name__ == "__main__":
     assistant_tool = AssistantTool()
+    print(assistant_tool.list_indices())
 #     # print(assistant_tool._get_index('master'))
 #     assistant_tool.add_vector_to_index('transcripts', 'transcripts')
 #     # assistant_tool.add_vector_to_index('carousel', 'master', 'carousel')
 #     # print(assistant_tool.test_retrieval('What is the main topic of the podcasts?', 'podcast'))
-    run = True
-    while run:
-        query = input('Enter: ')
-        if query == 'q':
-            run = False
-        else:
-            print(assistant_tool.query_response(query))
+    # run = True
+    # test_user_id = input("enter your key: ")  # Example user ID for testing
+    # while run:
+    #     query = input('Enter: ')
+    #     if query == 'q':
+    #         run = False
+    #     else:
+    #         print(assistant_tool.query_response(query, test_user_id))
 
 
 

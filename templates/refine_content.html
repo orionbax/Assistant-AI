@@ -172,7 +172,7 @@
 </head>
 <body>
     <div class="upload-container">
-        <a href="/" class="nav-link" style="float: right;">Switch to Cursor Test</a>
+        <a href="/" class="nav-link" style="float: right;">Return to main page</a>
         <h1>Content Upload</h1>
         
         <div class="section">
@@ -209,12 +209,29 @@
 
         async function loadIndices() {
             try {
-                const response = await fetch('/indices');
+                const response = await fetch('/indices', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({})
+                });
                 if (!response.ok) {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
                 const data = await response.json();
+                console.log(data)
                 const indices = data.indices || [];
+                console.log(indices)
+                
+                if (indices.length === 0) {
+                    // Add message when no indices are available
+                    statusMessage.textContent = 'No indices available. Please create an index first.';
+                    statusMessage.className = 'status-message error';
+                    statusMessage.style.display = 'block';
+                    indexSelect.disabled = true;
+                    return;
+                }
                 
                 // Clear and add the default option
                 indexSelect.innerHTML = '<option value="" disabled selected>Choose an index...</option>';
@@ -231,11 +248,16 @@
                     option.textContent = displayName;
                     indexSelect.appendChild(option);
                 });
+
+                // Hide any previous error messages
+                statusMessage.style.display = 'none';
+                indexSelect.disabled = false;
             } catch (error) {
                 console.error('Error loading indices:', error);
                 statusMessage.textContent = 'Failed to load indices. Please refresh the page.';
                 statusMessage.className = 'status-message error';
                 statusMessage.style.display = 'block';
+                indexSelect.disabled = true;
             }
         }
 
@@ -357,6 +379,13 @@
                 statusMessage.className = 'status-message error';
             } finally {
                 uploadButton.disabled = false;
+            }
+        });
+
+        // Add index selection change handler
+        indexSelect.addEventListener('change', () => {
+            if (indexSelect.value) {
+                statusMessage.style.display = 'none';
             }
         });
     </script>

@@ -7,6 +7,17 @@ const charCounter = document.getElementById('charCounter');
 const sendButton = document.getElementById('sendButton');
 
 
+// Initialize chat when page loads
+document.addEventListener('DOMContentLoaded', function() {
+    // Get or create session
+    fetch('/start')
+        .then(response => response.json())
+        .then(data => {
+            console.log('Session initialized:', data.user_id);
+        })
+        .catch(error => console.error('Error initializing session:', error));
+}); 
+
 userInput.addEventListener('input', function() {
     const length = this.value.length;
     charCounter.textContent = `${length}/${CHAR_LIMIT}`;
