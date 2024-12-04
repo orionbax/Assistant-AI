@@ -2,7 +2,7 @@ import os
 from uuid import uuid4
 from dotenv import load_dotenv
 from pinecone import Pinecone, ServerlessSpec
-from langchain.document_loaders import PyPDFDirectoryLoader
+# from langchain.document_loaders import PyPDFDirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_pinecone import PineconeVectorStore
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
@@ -11,13 +11,18 @@ from langchain.tools.retriever import create_retriever_tool
 from langchain.prompts import PromptTemplate
 from tiktoken import encoding_for_model
 from tenacity import retry, stop_after_attempt, wait_exponential
-
+from langchain_community.document_loaders import PyPDFDirectoryLoader
 # Load environment variables
 load_dotenv()
 
 # Constants
 INSTRUCTIONS = """
-    You are an AI assistant that generates content in two different formats depending on the query type.
+    You are a specialized AI assistant focused ONLY on two specific types of content:
+    1. Social media content generation (specifically carousels)
+    2. Podcast content retrieval and information
+
+    If a query is outside these two domains, politely explain that you are a specialized assistant 
+    focused only on social media carousel content and podcast information, and cannot help with other topics.
 
     For social media content (carousel type):
     - Maintain a professional yet conversational tone
@@ -29,18 +34,14 @@ INSTRUCTIONS = """
     Response structure for carousel content:
     {{
         "type": "carousel",
- 
         "topic": "Main topic title",
         "paragraph": "Introduction paragraph that sets the context",
         "body": [
             {{
-                "sub_topics": "Subtitle 1",
-                "content": "Content for subtitle 1"
-            }},
-            {{
-                "sub_topics": "Subtitle 2",
-                "content": "Content for subtitle 2"
+                "sub_topics": "Subtitle",
+                "content": "Content for this subtitle"
             }}
+            // Additional sub-topics as needed...
         ],
         "summary": "A concise summary of the entire content",
         "caption": "An engaging caption for social media",
@@ -49,14 +50,19 @@ INSTRUCTIONS = """
     }}
 
     For podcast content:
-    - ONLY answer using information from the retrieved podcast documents
-    - Provide detailed answers based on the podcast content
+    - BASE your answer on information from the retrieved podcast documents
     - Do not make up or add information that isn't in the retrieved documents
     - If no podcast documents are found, respond with an error message
     Response structure for podcast content:
     {{
         "type": "podcast",
         "answer": "Direct answer from podcast content"
+    }}
+
+    For out-of-scope queries:
+    {{
+        "type": "error",
+        "answer": "I am a specialized assistant focused only on social media carousel content and podcast information. I cannot help with [specific topic]. Please ask questions related to social media carousel content creation or podcast information."
     }}
 
     Context so far:
@@ -68,8 +74,9 @@ INSTRUCTIONS = """
     Remember:
     1. For podcast queries, ONLY use information from the retrieved documents
     2. If no podcast documents are found, return: {{"type": "podcast", "answer": "No relevant podcast content found"}}
-    3. Always include the "type" field: "carousel" for content generation, "podcast" for podcast queries
+    3. Always include the "type" field: "carousel" for content generation, "podcast" for podcast queries, "error" for out-of-scope queries
     4. Podcast responses should be direct answers referencing only the retrieved content
+    5. Do not attempt to answer questions outside of social media carousel content and podcast information
 """
 
 DIMENSION = 3072
@@ -140,36 +147,27 @@ class AssistantTool:
         """Load documents from a directory."""
         return PyPDFDirectoryLoader(directory).load()
 
-    def add_vector_to_index(self, files_dir, index, namespace):
-        """Add documents to the vector store with a specified namespace."""
-        if not namespace:
-            raise ValueError("Namespace must be provided when adding documents to an index.")
-
-        print("...Loading Data")
+    def add_vector_to_index(self, files_dir, index_name, namespace=""):
+        """Add documents to the vector store."""
         documents = self.chunk_data(self.read_doc(files_dir))
-        print(f"Number of chunks: {len(documents)}")
         
         uuids = [str(uuid4()) for _ in range(len(documents))]
-        index = self.get_index(index)
+        index = self._get_index(index_name)
         vector_store = PineconeVectorStore(index=index, embedding=self.embeddings)
-        vector_store.add_documents(documents=documents, ids=uuids, namespace=namespace)
-        print("Data loading completed!")
+        vector_store.add_documents(documents=documents, ids=uuids)
 
     def delete_index_content(self, index_name):
         """Delete all contents from an index."""
         if index_name in self.pinecone.list_indexes().names():
             index = self.pinecone.Index(index_name)
             index.delete(delete_all=True)
-            print(f'Removed contents of {index_name} successfully!')
             return True
-        print(f"Could not find {index_name} in the index list")
         return False
 
     def show_index_content(self, index_name, namespace=None):
         """Display all vectors and metadata from an index."""
         try:
             if index_name not in self.pinecone.list_indexes().names():
-                print(f"Index '{index_name}' not found!")
                 return
 
             index = self.pinecone.Index(index_name)
@@ -180,28 +178,12 @@ class AssistantTool:
             )
             
             if not query_response.matches:
-                print(f"No data found in index '{index_name}'" + 
-                      (f" namespace '{namespace}'" if namespace else ""))
                 return
             
-            print(f"\nContent in index '{index_name}'" + 
-                  (f" namespace '{namespace}'" if namespace else ""))
-            print("-" * 50)
-            
-            for i, match in enumerate(query_response.matches, 1):
-                print(f"\nEntry {i}:")
-                print(f"ID: {match.id}")
-                print(f"Score: {match.score}")
-                if match.metadata:
-                    print("Metadata:")
-                    for key, value in match.metadata.items():
-                        print(f"  {key}: {value}")
-                print("-" * 30)
-            
-            print(f"\nTotal entries found: {len(query_response.matches)}")
+            return query_response.matches
             
         except Exception as e:
-            print(f"Error retrieving index content: {e}")
+            raise RuntimeError(f"Error retrieving index content: {e}")
 
     def get_executor(self):
         """Initialize the agent executor with necessary tools."""
@@ -244,7 +226,7 @@ class AssistantTool:
         agent = create_tool_calling_agent(self.llm, tools, prompt)
         self.agent_executor = AgentExecutor(
             agent=agent, 
-            verbose=True, 
+            verbose=False, 
             tools=tools, 
             max_iterations=25
         )
@@ -258,11 +240,10 @@ class AssistantTool:
                 if query_tokens > MAX_QUERY_TOKENS:
                     query = encoder.decode(encoder.encode(query)[:MAX_QUERY_TOKENS])
             except Exception as e:
-                print(f"Warning: Token counting failed: {e}")
+                pass
             
             return self.agent_executor.invoke({'input': query})['output']
         except Exception as e:
-            print(f"Error processing query: {e}")
             return {
                 "type": "error",
                 "answer": "Irrelevant question"
@@ -325,13 +306,8 @@ class AssistantTool:
     def list_indices(self):
         """List all indices in the Pinecone vector store."""
         try:
-            indices = self.pinecone.list_indexes().names()
-            if not indices:
-                print("No indices found in the vector store.")
-            else:
-                print("Indices in the vector store:")
-                for index in indices:
-                    print(f"- {index}")
+            indices = self.pinecone.list_indexes()
+            indices = [index.name for index in indices]
             return indices
         except Exception as e:
             print(f"Error listing indices: {e}")
@@ -340,27 +316,27 @@ class AssistantTool:
     def __del__(self):
         """Cleanup method to ensure proper resource handling."""
         try:
-            # Clean up any open connections or resources
             if hasattr(self, 'index'):
                 del self.index
             if hasattr(self, 'pinecone'):
                 del self.pinecone
-        except Exception as e:
-            print(f"Error during cleanup: {e}")
+        except Exception:
+            pass
 
-# Example usage
-if __name__ == "__main__":
-    assistant_tool = AssistantTool()
-    assistant_tool.list_indices()
-    # assistant_tool.add_vector_to_index('transcripts', 'master', 'podcast')
-    # assistant_tool.add_vector_to_index('carousel', 'master', 'carousel')
-    # print(assistant_tool.test_retrieval('What is the main topic of the podcasts?', 'podcast'))
-    run = True
-    while run:
-        query = input('Enter: ')
-        if query == 'q':
-            run = False
-        else:
-            print(assistant_tool.query_response(query))
+# # Example usage
+# if __name__ == "__main__":
+#     assistant_tool = AssistantTool()
+#     # print(assistant_tool._get_index('master'))
+#     assistant_tool.add_vector_to_index('transcripts', 'transcripts')
+#     # assistant_tool.add_vector_to_index('carousel', 'master', 'carousel')
+#     # print(assistant_tool.test_retrieval('What is the main topic of the podcasts?', 'podcast'))
+#     # run = True
+#     # while run:
+#     #     query = input('Enter: ')
+#     #     if query == 'q':
+#     #         run = False
+#     #     else:
+#     #         print(assistant_tool.query_response(query))
+
 
 

@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Content Upload</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #343541;
+            color: #fff;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+        }
+
+        .upload-container {
+            max-width: 900px;
+            margin: 0 auto;
+            width: 100%;
+            background-color: #444654;
+            border-radius: 8px;
+            padding: 30px;
+        }
+
+        .section {
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            color: #fff;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 10px;
+            color: #ececf1;
+        }
+
+        select, input[type="text"] {
+            width: 100%;
+            padding: 14px;
+            border-radius: 6px;
+            border: 1px solid #565869;
+            background-color: #40414f;
+            color: white;
+            font-size: 16px;
+            outline: none;
+            margin-bottom: 15px;
+        }
+
+        .file-upload {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            border: 2px dashed #565869;
+            border-radius: 6px;
+            background-color: #40414f;
+            cursor: pointer;
+            transition: border-color 0.3s ease;
+        }
+
+        .file-upload:hover {
+            border-color: #fff;
+        }
+
+        .file-upload input[type="file"] {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            cursor: pointer;
+        }
+
+        .upload-icon {
+            font-size: 40px;
+            margin-bottom: 10px;
+        }
+
+        .file-list {
+            margin-top: 20px;
+            color: #ececf1;
+        }
+
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background-color: #40414f;
+            border-radius: 4px;
+            margin-bottom: 5px;
+        }
+
+        .remove-file {
+            color: #ff4444;
+            cursor: pointer;
+            padding: 5px;
+        }
+
+        button {
+            width: 100%;
+            padding: 14px;
+            border-radius: 6px;
+            border: none;
+            background-color: #565869;
+            color: white;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+
+        button:hover {
+            background-color: #6e7081;
+        }
+
+        button:disabled {
+            background-color: #40414f;
+            cursor: not-allowed;
+        }
+
+        .status-message {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 6px;
+            text-align: center;
+        }
+
+        .success {
+            background-color: #2ecc71;
+            color: white;
+        }
+
+        .error {
+            background-color: #e74c3c;
+            color: white;
+        }
+
+        .nav-link {
+            display: inline-block;
+            padding: 8px 16px;
+            background-color: #40414f;
+            color: #ececf1;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 14px;
+            border: 1px solid #565869;
+            transition: all 0.3s ease;
+            margin-bottom: 15px;
+        }
+
+        .nav-link:hover {
+            background-color: #565869;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="upload-container">
+        <a href="/" class="nav-link" style="float: right;">Switch to Cursor Test</a>
+        <h1>Content Upload</h1>
+        
+        <div class="section">
+            <div class="form-group">
+                <label for="index_name">Select Index:</label>
+                <select class="form-control" id="index_name" name="index_name" required>
+                    <option value="" disabled selected>Choose an index...</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="fileUpload">Upload Files:</label>
+                <div class="file-upload" id="dropZone">
+                    <div class="upload-icon">📁</div>
+                    <p>Drag and drop files here or click to browse</p>
+                    <input type="file" id="fileUpload" multiple accept=".pdf" />
+                </div>
+                <div class="file-list" id="fileList"></div>
+            </div>
+
+            <button id="uploadButton" disabled>Upload Files</button>
+            <div id="statusMessage" class="status-message" style="display: none;"></div>
+        </div>
+    </div>
+
+    <script>
+        const fileUpload = document.getElementById('fileUpload');
+        const fileList = document.getElementById('fileList');
+        const uploadButton = document.getElementById('uploadButton');
+        const dropZone = document.getElementById('dropZone');
+        const statusMessage = document.getElementById('statusMessage');
+        const indexSelect = document.getElementById('index_name');
+        let files = [];
+
+        async function loadIndices() {
+            try {
+                const response = await fetch('/indices');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                const indices = data.indices || [];
+                
+                // Clear and add the default option
+                indexSelect.innerHTML = '<option value="" disabled selected>Choose an index...</option>';
+                
+                // Sort and add the indices
+                indices.sort().forEach(index => {
+                    const option = document.createElement('option');
+                    option.value = index;
+                    const displayName = index
+                        .replace(/-/g, ' ')
+                        .split(' ')
+                        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                        .join(' ');
+                    option.textContent = displayName;
+                    indexSelect.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Error loading indices:', error);
+                statusMessage.textContent = 'Failed to load indices. Please refresh the page.';
+                statusMessage.className = 'status-message error';
+                statusMessage.style.display = 'block';
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', loadIndices);
+
+        function updateFileList() {
+            fileList.innerHTML = '';
+            files.forEach((file, index) => {
+                const fileItem = document.createElement('div');
+                fileItem.className = 'file-item';
+                fileItem.innerHTML = `
+                    <span>${file.name}</span>
+                    <span class="remove-file" onclick="removeFile(${index})">✕</span>
+                `;
+                fileList.appendChild(fileItem);
+            });
+            updateUploadButton();
+        }
+
+        function removeFile(index) {
+            files.splice(index, 1);
+            updateFileList();
+        }
+
+        function updateUploadButton() {
+            uploadButton.disabled = files.length === 0;
+        }
+
+        fileUpload.addEventListener('change', (e) => {
+            const newFiles = Array.from(e.target.files);
+            files = [...files, ...newFiles.filter(file => file.type === 'application/pdf')];
+            updateFileList();
+        });
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.style.borderColor = '#fff';
+        });
+
+        dropZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dropZone.style.borderColor = '#565869';
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.style.borderColor = '#565869';
+            const newFiles = Array.from(e.dataTransfer.files);
+            files = [...files, ...newFiles.filter(file => file.type === 'application/pdf')];
+            updateFileList();
+        });
+
+        uploadButton.addEventListener('click', async () => {
+            // Disable button and show loading state
+            uploadButton.disabled = true;
+            statusMessage.textContent = 'Uploading files...';
+            statusMessage.className = 'status-message';
+            statusMessage.style.display = 'block';
+
+            const formData = new FormData();
+            
+            // Verify we have a selected index
+            if (!indexSelect.value) {
+                statusMessage.textContent = 'Please select an index first';
+                statusMessage.className = 'status-message error';
+                statusMessage.style.display = 'block';
+                uploadButton.disabled = false;
+                return;
+            }
+            
+            // Add the selected index
+            formData.append('index', indexSelect.value);
+            
+            // Verify we have files
+            if (files.length === 0) {
+                statusMessage.textContent = 'Please select at least one PDF file';
+                statusMessage.className = 'status-message error';
+                statusMessage.style.display = 'block';
+                uploadButton.disabled = false;
+                return;
+            }
+
+            // Add all files and log what we're sending
+            files.forEach((file, index) => {
+                if (file.type !== 'application/pdf') {
+                    console.warn(`File ${file.name} is not a PDF`);
+                    return;
+                }
+                formData.append('files', file);
+                console.log(`Adding file: ${file.name}, type: ${file.type}, size: ${file.size} bytes`);
+            });
+
+            try {
+                console.log('Selected index:', indexSelect.value);
+                console.log('Number of files:', files.length);
+                
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    // Try to get more detailed error information
+                    const errorText = await response.text();
+                    throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
+                }
+
+                const result = await response.json();
+                statusMessage.textContent = 'Files uploaded successfully!';
+                statusMessage.className = 'status-message success';
+                
+                // Clear the file list after successful upload
+                files = [];
+                updateFileList();
+
+            } catch (error) {
+                console.error('Upload error:', error);
+                statusMessage.textContent = 'Failed to upload files. Please try again.';
+                statusMessage.className = 'status-message error';
+            } finally {
+                uploadButton.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

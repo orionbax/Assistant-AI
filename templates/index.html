@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat Interface</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div style="position: fixed; top: 20px; left: 20px; display: flex; align-items: center; gap: 20px; z-index: 1000;">
+        <div style="background: linear-gradient(135deg, #2196F3, #4CAF50); color: white; padding: 10px 20px; border-radius: 25px; font-weight: 500; box-shadow: 0 2px 10px rgba(0,0,0,0.1); font-size: 14px; letter-spacing: 0.5px;">
+            AI-Assistant
+        </div>
+        <!-- <a href="/refine" 
+           onmouseover="this.style.backgroundColor='rgba(255,255,255,0.1)'" 
+           onmouseout="this.style.backgroundColor='transparent'"
+           style="text-decoration: none; 
+                  color: #fff; 
+                  font-weight: 500; 
+                  padding: 10px 20px; 
+                  border-radius: 25px; 
+                  font-size: 14px; 
+                  letter-spacing: 0.5px; 
+                  background: transparent; 
+                  border: 2px solid rgba(255,255,255,0.2); 
+                  backdrop-filter: blur(5px); 
+                  transition: all 0.3s ease;">
+            Refine Content
+        </a> -->
+    </div>
+    <div class="chat-container" id="chatContainer">
+        <!-- Messages will be added here dynamically -->
+    </div>
+    <div class="input-container">
+        <div class="input-box">
+            <textarea placeholder="Write your prompt..." rows="1" id="userInput" maxlength="1000"></textarea>
+            <div class="char-counter" id="charCounter">0/1000</div>
+            <button class="send-button" onclick="sendMessage()" id="sendButton">
+                <svg stroke="currentColor" fill="none" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" height="1em" width="1em" xmlns="http://www.w3.org/2000/svg">
+                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='index.js') }}">
+        
+    </script>
+</body>
+</html>
+
+
+
