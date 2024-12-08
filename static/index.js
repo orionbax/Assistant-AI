@@ -224,3 +224,48 @@ document.getElementById('userInput').addEventListener('keypress', function(e) {
         document.getElementById('userInput').focus();
     }
 });
+
+function openRefinePopup() {
+    const popup = document.getElementById('refinePopup');
+    if (popup) {
+        popup.style.display = 'block';
+        loadIndices(); // Load indices when the popup is opened
+    }
+}
+
+async function loadIndices() {
+    try {
+        const response = await fetch('/indices', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json();
+        const indices = data.indices || [];
+        
+        const indexSelect = document.getElementById('indexSelect');
+        indexSelect.innerHTML = '<option value="" disabled selected>Choose an index...</option>';
+        
+        indices.sort().forEach(index => {
+            const option = document.createElement('option');
+            option.value = index;
+            option.textContent = index.replace(/-/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
+            indexSelect.appendChild(option);
+        });
+    } catch (error) {
+        console.error('Error loading indices:', error);
+    }
+}
+
+function closeRefinePopup() {
+    const popup = document.getElementById('refinePopup');
+    if (popup) {
+        popup.style.display = 'none';
+    }
+}
+
+// Ensure this script is correctly linked in your HTML and that there are no JavaScript errors in the console.
