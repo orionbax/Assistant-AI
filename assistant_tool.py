@@ -11,15 +11,16 @@ from langchain.tools.retriever import create_retriever_tool
 from langchain.prompts import PromptTemplate
 from tiktoken import encoding_for_model
 from tenacity import retry, stop_after_attempt, wait_exponential
-from langchain_community.document_loaders import PyPDFDirectoryLoader
+from langchain_community.document_loaders import PyPDFDirectoryLoader, PyPDFLoader
 from typing import Dict
 import regex
 import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
-from langchain_core.tools import tool
+# from langchain_core.tools import tool
 from  langchain.tools import Tool
-
+#ONLY ASCII READABLE STRING CAN BE USED AS A NAMESPACE SO WHEN 
+# YOU QUERY USING NAMESPACE MAKE SURE TO SANITIZE THE NAMESPACE
 ### Where instructions are stored
 from instructions import *
 # Load environment variables
@@ -58,7 +59,6 @@ class AssistantTool:
         # Create/get both indices
         self.carousel_index = self._get_index(self.carousel_index_name)
         self.podcast_index = self._get_index(self.podcast_index_name)
-        
         # Create vector stores for both indices
         self.carousel_vector_store = PineconeVectorStore(
             index=self.carousel_index, 
@@ -102,30 +102,29 @@ class AssistantTool:
             for chunk in chunks:
                 # Preserve existing metadata and merge with new metadata
                 chunk.metadata = {**chunk.metadata, **metadata}
-                # Remove text from metadata to save space
-                # chunk.metadata.pop("text", None)
-        
+                # directory = os.path.dirname(chunk.metadata['source'])
+                # file_name = os.path.basename(chunk.metadata['source'])
+                # # chunk.metadata['namespace'] = file_name # to delete specific file from index
+                # chunk.metadata['namespace'] = file_name 
         return chunks
 
     def read_doc(self, directory):
         """Load documents from a directory."""
         return PyPDFDirectoryLoader(directory).load()
 
-    def add_vector_to_index(self, files_dir, content_type, metadata=None):
+    def add_vector_to_index(self, content_type, metadata=None):
+        directory = os.path.join('platform_specific_documents/', content_type)
+        print(f'directory: {directory}')
         """Add documents to the vector store based on content type."""
         if content_type not in ['carousel', 'podcast']:
             raise ValueError("content_type must be either 'carousel' or 'podcast'")
         
         # Read and chunk the documents
-        documents = self.chunk_data(self.read_doc(files_dir), metadata=metadata)
-        
-        # Generate unique IDs for the documents
-        uuids = [str(uuid4()) for _ in range(len(documents))]
-
-        # Prepare vectors for the documents
-        # vectors = self.embeddings.embed_documents([doc.page_content for doc in documents])
-
+        documents = self.chunk_data(self.read_doc(directory), metadata=metadata)
+        print(len(documents))
         upsert_data = []
+        count = 0
+        print('embedding documents')
         for document in documents:
             # Generate unique ID for the chunk
             doc_id = str(uuid4())
@@ -136,37 +135,19 @@ class AssistantTool:
             document.page_content = ''
             # Append tuple of (id, vector, metadata) for upsert
             upsert_data.append((doc_id, vector, document.metadata))
+            count += 1
+            print(f'{count} / {len(documents)}')
+        print('finished embedding documents')
 
-        # Perform the upsert
-        # Get the index for the content type
         index = self._get_index(content_type)
+        print('Starting upload')
         
-        # Upsert the vectors in batches to avoid memory issues
-        # batch_size = 100
-        # for i in range(0, len(upsert_data), batch_size):
-        #     batch = upsert_data[i:i + batch_size]
-            
-        #     # Format data for upsert
-        #     vectors = {
-        #         id_: {
-        #             "values": vector,
-        #             "metadata": metadata
-        #         }
-        #         for id_, vector, metadata in batch
-        #     }
-            
-        #     # Upsert the batch
-        index.upsert(vectors=upsert_data)
-        # self.upsert(upsert_data)
-        
-        # Add documents to the vector store
-        # vector_store.add_documents(
-        #     documents=documents,
-        #     ids=uuids,
-        #     # embeddings=vectors,
-        #     # metadata=[doc.metadata for doc in documents]
-        # )
-        print(f"{len(documents)} documents successfully added to the {content_type} vector store!")
+        # Upload each vector separately
+        for doc_id, vector, metadata in upsert_data:
+            file_name = os.path.basename(metadata['source'])
+            # Sanitize the namespace to ensure it contains only ASCII-printable characters
+            sanitized_namespace = ''.join(c for c in file_name if c.isprintable() and ord(c) < 128)
+            index.upsert(vectors=[(doc_id, vector, metadata)], show_progress=True, namespace=sanitized_namespace)
 
     def delete_index_content(self, index_name):
         """Delete all contents from an index."""
@@ -175,7 +156,13 @@ class AssistantTool:
             index.delete(delete_all=True)
             return True
         return False
-
+    def delete_file_from_index(self, index_name, namespace):
+        """Delete a specific file from an index."""
+        index = self.pinecone.Index(index_name)
+        sanitized_namespace = ''.join(c for c in namespace if c.isprintable() and ord(c) < 128)
+        # index.delete(delete_all=True,namespace=sanitized_namespace)
+        # test deletion with metadata 
+        
     def show_index_content(self, index_name, namespace=None):
         """Display all vectors and metadata from an index."""
         try:
@@ -185,14 +172,24 @@ class AssistantTool:
             index = self.pinecone.Index(index_name)
             query_response = index.query(
                 vector=[0] * DIMENSION,
-                top_k=10000,
-                namespace=namespace
+                top_k=10000 ,
+                include_values=False,
+                include_metadata=True,
+                # namespace=namespace
             )
+            response = query_response.matches
+            file_names = set()
+            for match in response:
+                file_names.add(match.metadata['source'])
+            documents = [self._get_file(file, index_name)[0].page_content[:1000] for file in file_names]
+            # print(documents)
+            print(len(documents))
+            return documents
+
+            # if not query_response.matches:
+            #     return
             
-            if not query_response.matches:
-                return
-            
-            return query_response.matches
+            # return query_response.matches
             
         except Exception as e:
             raise RuntimeError(f"Error retrieving index content: {e}")
@@ -212,48 +209,96 @@ class AssistantTool:
             ])
         return "\n".join(formatted_history)
 
+    def carousel_retriever_tool(self, query):
+        """
+         Use this tool to retrieve content from the carousel vector store.
+         Input should be a string describing the content you want to retrieve.
+        """
+        try:
+            retriever = self.carousel_vector_store.as_retriever(
+                search_kwargs={"k": 2}
+            )
+            response = retriever.invoke(query)
+            documents = [self._get_file(document.metadata['source'], 'carousel') for document in response]
+            print([document.metadata['source'] for document in response])
+            print(len(documents))
+
+            return documents
+        except Exception as e:
+            print(f"Error retrieving from carousel: {e}")
+            return None
+        
+    def podcast_retriever_tool(self, query):
+        """
+         Use this tool to retrieve content from the carousel vector store.
+         Input should be a string describing the content you want to retrieve.
+        """
+        try:
+            retriever = self.podcast_vector_store.as_retriever(
+                search_kwargs={"k": 2}
+            )
+            response = retriever.invoke(query)
+            documents = [self._get_file(document.metadata['source'], 'podcast') for document in response]
+            print([document.metadata['source'] for document in response])
+            print(len(documents))
+
+            return documents
+        except Exception as e:
+            print(f"Error retrieving from carousel: {e}")
+            return None
+        
     def get_executor(self):
         """Initialize the agent executor with necessary tools."""
         if self.agent_executor:
             return
 
         prompt = PromptTemplate(
-            template=INSTRUCTIONS, 
-            input_variables=['agent_scratchpad', 'input', 'conversation_history'],
+            template=INSTRUCTIONS_beta, 
+            input_variables=['agent_scratchpad', 'input', 'conversation_history', 'persona'],
         )
 
         # Use separate vector stores for each content type
         carousel_retriever = self.carousel_vector_store.as_retriever(
             search_kwargs={
-                "k": 4
+                "k": 2
             }
         )
         podcast_retriever = self.podcast_vector_store.as_retriever(
             search_kwargs={
-                "k": 4
+                "k": 2
             }
         )
 
         # Create tools with the separate retrievers
         tools = [
-            create_retriever_tool(
-                retriever=carousel_retriever,
-                name="social_media_content",
-                description="Use this tool for social media content generation, LinkedIn posts, and content strategy queries. Make only one call to this tool."
+            # create_retriever_tool(
+            #     retriever=carousel_retriever,
+            #     name="social_media_content",
+            #     description="Use this tool for social media content generation, LinkedIn posts, and content strategy queries. Make only one call to this tool."
+            # ),
+            Tool(
+                name="carousel_content",
+                func=self.carousel_retriever_tool,
+                description="Use this tool to retrieve content from the carousel vector store. Input should be a string describing the content you want to retrieve."
             ),
-            create_retriever_tool(
-                retriever=podcast_retriever,
+            # create_retriever_tool(
+            #     retriever=podcast_retriever,
+            #     name="podcast_content",
+            #     description="Use this tool for podcast-related queries, summaries, and insights from podcast episodes. Make only one call to this tool."
+            # ),
+            Tool(
                 name="podcast_content",
-                description="Use this tool for podcast-related queries, summaries, and insights from podcast episodes. Make only one call to this tool."
+                func=self.podcast_retriever_tool,
+                description="Use this tool to retrieve content from the podcast vector store. Input should be a string describing the content you want to retrieve."
             ),
             Tool(
                 name="save_thoughts",
                 func=self.save_thought_process,
                 description="""
-                    Use this tool to save your thought process and reasoning steps as well as the reference you used to come up with the answer. 
-                    Input should be a string describing your current thoughts.
+                   Use this tool to save your thought process and reasoning steps as well as your persona and tone, You must use this tool with each step you take!!
+                 Input should be a string value describing your thought process in a concise manner.
                 """
-            )
+            ),
         ]
 
         agent = create_tool_calling_agent(self.llm, tools, prompt)
@@ -261,7 +306,7 @@ class AssistantTool:
             agent=agent, 
             verbose=self.debug,
             tools=tools, 
-            max_iterations=3,
+            max_iterations=25,
             early_stopping_method="force"
         )
     
@@ -314,9 +359,26 @@ class AssistantTool:
 
         return "{}"  # Return empty JSON if no valid structure found
 
-    def query_response(self, query: str, user_id: str):
+    def _get_instructions(self, content_type: str):
+        instruction = ""
+        if content_type == 'carousel':
+            instruction = carousel_instructions.format(carousel_response_format=carousel_response_format)
+        elif content_type == 'podcast':
+            instruction = podcast_instructions.format(podcast_response_format=podcast_response_format)
+        print(instruction)
+        return instruction
+        # return "You Are An AI Assistant"
+        
+    def query_response(self, query: str, 
+                       user_id: str, 
+                       persona: str = personas['joker'], 
+                       tone: str = tones['funny'], 
+                       out_put_type: str = None
+                       ):
         """Process a query and return the response in JSON format."""
         try:
+            print(f'persona: {persona}')
+            print(f'tone: {tone}')
             encoder = encoding_for_model(MODEL_NAME)
             try:
                 query_tokens = len(encoder.encode(query))
@@ -332,7 +394,8 @@ class AssistantTool:
                     {
                         'input': query,
                         'conversation_history': self.format_conversation_history(user_id),
-                        'pretty_repr': True
+                        'persona': persona,
+                        'tone': tone,
                     }
                 )
                 try:
@@ -341,13 +404,15 @@ class AssistantTool:
                     response = self.clean_ai_response(response)
                     # print(response)
                     # Extract JSON from response
+                    self.add_to_history(user_id, query, response)
+                    return response
                 except TimeoutError:
                     response = {
                         "type": "error",
                         "answer": "Request timed out. Please try again with a more specific query."
                     }
             
-            self.add_to_history(user_id, query, response)
+            
             print(response)
             return response
         except Exception as e:
@@ -389,7 +454,8 @@ class AssistantTool:
                     "content": doc.page_content,
                     "metadata": doc.metadata
                 })
-
+            source = results["documents"][0]["metadata"]["source"]
+            # print(self._get_file(source, content_type))
             return results
 
         except Exception as e:
@@ -411,7 +477,7 @@ class AssistantTool:
             print(f"Error listing indices: {e}")
             return []
 
-    def get_files(self, index_name):
+    def _get_file(self, file_name, content_type):
         """Get all metadata and namespaces in a given index.
         
         Args:
@@ -420,13 +486,17 @@ class AssistantTool:
         Returns:
             dict: Dictionary containing stats, metadata and namespaces
         """
-        index = self._get_index(index_name)
-        # results = index.query(vector=[0] * DIMENSION, top_k=10000, include_metadata=True, include_values=False)
-        # return results
-        # query_vector = model.encode(query).tolist()
-        # results = index.query(query_vector, top_k=top_k, include_metadata=True)
-        # metadata_only = [{"chunk_id": match["id"], "metadata": match["metadata"]} for match in results["matches"]]
-        # return metadata_only
+        directory = os.path.dirname(file_name)
+        file_name = os.path.basename(file_name)
+        file_name = file_name.replace('EP 79_ SoundHub & SoundInvest Script-1.pdf', 'EP 79_ SoundHub & SoundInvest Script.pdf')
+        full_path = os.path.join('platform_specific_documents', content_type, file_name)
+        # print(full_path)
+        try:
+            return PyPDFLoader(full_path).load()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"PDF file not found at path: {full_path}")
+        except Exception as e:
+            raise RuntimeError(f"Error loading PDF file: {str(e)}")
 
     def __del__(self):
         """Cleanup method to ensure proper resource handling."""
@@ -443,17 +513,24 @@ class AssistantTool:
 from pprint import pprint
 if __name__ == "__main__":
     assistant_tool = AssistantTool()
-    # print(assistant_tool.list_indices())
-#     # print(assistant_tool._get_index('master'))
-#     assistant_tool.add_vector_to_index('transcripts', 'transcripts')
-    # assistant_tool.add_vector_to_index(os.path.join(os.getcwd(), 
-                                                    # 'corousels_txt/'), 'carousel',
-                                                    #   metadata={'type': 'carousel'})
-    # print(assistant_tool.get_files('carousel'))
-    # pprint(assistant_tool.show_index_content('carousel'))
+    
+    
+    # assistant_tool.add_vector_to_index('carousel',
+    #                                     metadata={'type': 'carousel'})
+
+    # assistant_tool.add_vector_to_index('podcast',
+    #                                     metadata={'type': 'podcast'})
+
 
     # print(assistant_tool.test_retrieval('What is the main topic of the podcasts?', 'podcast'))
-    print(assistant_tool.test_retrieval('Real engagement', 'carousel'))
+    # print(assistant_tool.test_retrieval('Real engagement', 'carousel'))
+    # print(assistant_tool.carousel_retriever_tool())
+    # print(assistant_tool._get_file('Finding Your Niche.pdf'))
+
+    # print(assistant_tool.query_response("Need a content about Real Engagement?", '1'))
+
+    # print(assistant_tool.query_response("What is the main topic of the podcasts?", '1'))
+    # pprint(assistant_tool.show_index_content('carousel'))
 
     # run = True
     # test_user_id = input("enter your key: ")  # Example user ID for testing
@@ -464,12 +541,10 @@ if __name__ == "__main__":
     #     else:
     #         print(assistant_tool.query_response(query, test_user_id))
     
-    # # pprint(assistant_tool.thought_process)
-    # # pprint(len(assistant_tool.thought_process))
-    
-
     # pprint(assistant_tool.thought_process)
-    # print(len(assistant_tool.thought_process))
+    # pprint(len(assistant_tool.thought_process))
 
+    assistant_tool.delete_file_from_index('carousel', 'Real engagement .pdf')   
+    print('done~')
 
 

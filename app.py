@@ -101,7 +101,7 @@ def upload_files():
     except Exception as e:
         return jsonify({'message': f'Error processing upload: {str(e)}'}), 500
 
-@app.route('/refine')
+@app.route('/refine_content')
 def refine_content():
     """Render the content refinement interface."""
     return render_template('refine_content.html')
