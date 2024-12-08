@@ -16,115 +16,17 @@ from typing import Dict
 import regex
 import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+from langchain_core.tools import tool
+from  langchain.tools import Tool
+
+### Where instructions are stored
+from instructions import *
 # Load environment variables
 load_dotenv()
 
-# Constants
-INSTRUCTIONS = """
-    You are a specialized AI assistant that MUST ALWAYS respond in valid JSON format.
-    You are focused ONLY on three specific types of content:
-    1. Social media content generation (specifically carousels)
-    2. Podcast content retrieval and information
-    3. Previous conversation retrieval and information
-
-    CRITICAL RESPONSE RULES:
-    - You MUST ALWAYS respond with properly formatted JSON
-    - NO additional text before or after the JSON
-    - NO explanations outside the JSON structure
-    - Make maximum TWO tool calls per query
-    - After getting tool responses, format your final answer immediately as JSON
-    - NEVER make additional tool calls after receiving the initial responses
-    - If you are asked to modify the content, DO NOT make any more calls.
-
-    CONTENT GUIDELINES:
-    For social media content (carousel type):
-    - Maintain a professional yet conversational tone
-    - Focus on value and actionable insights
-    - Keep content detailed and engaging
-    - Use clear structure and formatting
-    - Avoid jargon and buzzwords
-    - Try and reflect the style of the previous posts from the provided documents
-
-    For podcast content:
-    - BASE your answer on information from the retrieved podcast documents ONLY
-    - If no podcast documents are found, respond with the no-content JSON response
-    - Keep responses focused and direct
-    - Include relevant quotes or specific references when available
-
-    RESPONSE FORMATS:
-
-    1. For social media carousel content:
-    {{
-        "type": "carousel",
-        "topic": "Main topic title",
-        "paragraph": "Introduction paragraph that sets the context",
-        "body": [
-            {{
-                "sub_topics": "Subtitle",
-                "content": "Content for this subtitle"
-            }}
-        ],
-        "summary": "A concise summary of the entire content",
-        "caption": "An engaging caption for social media",
-        "description": "A brief description of the content",
-        "hashtags": ["#Relevant", "#Hashtags", "#ForTheContent"]
-    }}
-
-    2. For podcast content:
-    {{
-        "type": "podcast",
-        "answer": "Direct answer from podcast content"
-    }}
-
-    3. For conversation history:
-    {{
-        "type": "error",
-        "answer": "Response about conversation history. If no history exists, explain that there are no previous conversations."
-    }}
-
-    4. For errors or out-of-scope queries:
-    {{
-        "type": "error",
-        "answer": "I am a specialized assistant focused only on social media carousel content, podcast information, and conversation history. I cannot help with [specific topic]. Please ask questions related to these topics."
-    }}
-
-    5. For content modification requests:
-    - Use the same JSON structure as the original content type
-    - Do not make new tool calls
-    - Modify the existing content while maintaining proper JSON format
-    - Preserve the original style and tone while making requested changes
-
-    STRICT RULES:
-    1. ALWAYS respond with ONE of the above JSON formats
-    2. NEVER include any text outside the JSON structure
-    3. For podcast queries, use ONLY information from the retrieved documents
-    4. If no podcast documents found: {{"type": "podcast", "answer": "No relevant podcast content found"}}
-    5. ALWAYS include the "type" field
-    6. DO NOT attempt to answer questions outside the three focus areas
-    7. Maintain consistent formatting and structure in responses
-    8. For carousel content, always include all required fields
-    9. Keep responses focused and relevant to the query
-    10. Preserve professional tone while remaining engaging
-
-    Previous conversation history:
-    {conversation_history}
-
-    Context so far:
-    {agent_scratchpad}
-
-    User query:
-    {input}
-"""
-
-DIMENSION = 3072
-CHUNK_SIZE = 800 
-CHUNK_OVERLAP = 50
-MAX_QUERY_TOKENS = 6000
-MODEL_NAME = "gpt-4"
-EMBEDDING_MODEL = "text-embedding-3-large"
-
 class AssistantTool:
-    def __init__(self, debug=False):
+    def __init__(self, debug=True):
         """Initialize the AssistantTool with necessary configurations."""
         self.debug = debug
         self._validate_env_vars()
@@ -132,6 +34,7 @@ class AssistantTool:
         self.agent_executor = None
         self.get_executor()
         self.conversation_histories: Dict[str, list] = {}
+        self.thought_process = []
 
     def _validate_env_vars(self):
         """Validate required environment variables are present."""
@@ -187,30 +90,83 @@ class AssistantTool:
         except Exception as e:
             raise RuntimeError(f"Failed to get or create Pinecone index: {str(e)}")
 
-    def chunk_data(self, docs, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP):
-        """Split documents into chunks."""
+    def chunk_data(self, docs, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP, metadata=None):
+        """Split documents into chunks and merge metadata."""
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size, 
             chunk_overlap=chunk_overlap
         )
-        return text_splitter.split_documents(docs)
+        chunks = text_splitter.split_documents(docs)
+        
+        if metadata:
+            for chunk in chunks:
+                # Preserve existing metadata and merge with new metadata
+                chunk.metadata = {**chunk.metadata, **metadata}
+                # Remove text from metadata to save space
+                # chunk.metadata.pop("text", None)
+        
+        return chunks
 
     def read_doc(self, directory):
         """Load documents from a directory."""
         return PyPDFDirectoryLoader(directory).load()
 
-    def add_vector_to_index(self, files_dir, content_type):
+    def add_vector_to_index(self, files_dir, content_type, metadata=None):
         """Add documents to the vector store based on content type."""
         if content_type not in ['carousel', 'podcast']:
             raise ValueError("content_type must be either 'carousel' or 'podcast'")
         
-        documents = self.chunk_data(self.read_doc(files_dir))
-        uuids = [str(uuid4()) for _ in range(len(documents))]
+        # Read and chunk the documents
+        documents = self.chunk_data(self.read_doc(files_dir), metadata=metadata)
         
-        if content_type == 'carousel':
-            self.carousel_vector_store.add_documents(documents=documents, ids=uuids)
-        else:  # podcast
-            self.podcast_vector_store.add_documents(documents=documents, ids=uuids)
+        # Generate unique IDs for the documents
+        uuids = [str(uuid4()) for _ in range(len(documents))]
+
+        # Prepare vectors for the documents
+        # vectors = self.embeddings.embed_documents([doc.page_content for doc in documents])
+
+        upsert_data = []
+        for document in documents:
+            # Generate unique ID for the chunk
+            doc_id = str(uuid4())
+            # Generate embedding for the chunk
+            vector = self.embeddings.embed_documents([document.page_content])[0]
+            document.metadata['text'] = document.metadata['source']
+            # Clear page content to save space
+            document.page_content = ''
+            # Append tuple of (id, vector, metadata) for upsert
+            upsert_data.append((doc_id, vector, document.metadata))
+
+        # Perform the upsert
+        # Get the index for the content type
+        index = self._get_index(content_type)
+        
+        # Upsert the vectors in batches to avoid memory issues
+        # batch_size = 100
+        # for i in range(0, len(upsert_data), batch_size):
+        #     batch = upsert_data[i:i + batch_size]
+            
+        #     # Format data for upsert
+        #     vectors = {
+        #         id_: {
+        #             "values": vector,
+        #             "metadata": metadata
+        #         }
+        #         for id_, vector, metadata in batch
+        #     }
+            
+        #     # Upsert the batch
+        index.upsert(vectors=upsert_data)
+        # self.upsert(upsert_data)
+        
+        # Add documents to the vector store
+        # vector_store.add_documents(
+        #     documents=documents,
+        #     ids=uuids,
+        #     # embeddings=vectors,
+        #     # metadata=[doc.metadata for doc in documents]
+        # )
+        print(f"{len(documents)} documents successfully added to the {content_type} vector store!")
 
     def delete_index_content(self, index_name):
         """Delete all contents from an index."""
@@ -263,7 +219,7 @@ class AssistantTool:
 
         prompt = PromptTemplate(
             template=INSTRUCTIONS, 
-            input_variables=['agent_scratchpad', 'input', 'conversation_history']
+            input_variables=['agent_scratchpad', 'input', 'conversation_history'],
         )
 
         # Use separate vector stores for each content type
@@ -289,6 +245,14 @@ class AssistantTool:
                 retriever=podcast_retriever,
                 name="podcast_content",
                 description="Use this tool for podcast-related queries, summaries, and insights from podcast episodes. Make only one call to this tool."
+            ),
+            Tool(
+                name="save_thoughts",
+                func=self.save_thought_process,
+                description="""
+                    Use this tool to save your thought process and reasoning steps as well as the reference you used to come up with the answer. 
+                    Input should be a string describing your current thoughts.
+                """
             )
         ]
 
@@ -297,9 +261,23 @@ class AssistantTool:
             agent=agent, 
             verbose=self.debug,
             tools=tools, 
-            max_iterations=3,  # Reduced from 25 to 3
-            early_stopping_method="force"  # Force stop after max_iterations
+            max_iterations=3,
+            early_stopping_method="force"
         )
+    
+    def save_thought_process(self, input_data: str) -> str:
+        """
+        Save the agent's thought process.
+        Args:
+            input_data: The thought process to save
+        Returns:
+            str: Confirmation message
+        """
+        # Check if this exact thought hasn't been saved before
+        if input_data not in self.thought_process:
+            self.thought_process.append(input_data)
+            return f"Thought process saved: {input_data}"
+        return "Thought already recorded"
 
     def add_to_history(self, user_id: str, user_input: str, response: str):
         """Add a user query and response to the conversation history for a specific user."""
@@ -353,7 +331,8 @@ class AssistantTool:
                     self.agent_executor.invoke,
                     {
                         'input': query,
-                        'conversation_history': self.format_conversation_history(user_id)
+                        'conversation_history': self.format_conversation_history(user_id),
+                        'pretty_repr': True
                     }
                 )
                 try:
@@ -369,6 +348,7 @@ class AssistantTool:
                     }
             
             self.add_to_history(user_id, query, response)
+            print(response)
             return response
         except Exception as e:
             return {
@@ -395,7 +375,7 @@ class AssistantTool:
             )
 
             docs = retriever.invoke(query)
-            
+            pprint(len(docs))
             results = {
                 "query": query,
                 "content_type": content_type,
@@ -431,6 +411,23 @@ class AssistantTool:
             print(f"Error listing indices: {e}")
             return []
 
+    def get_files(self, index_name):
+        """Get all metadata and namespaces in a given index.
+        
+        Args:
+            index_name (str): Name of the index to query
+            
+        Returns:
+            dict: Dictionary containing stats, metadata and namespaces
+        """
+        index = self._get_index(index_name)
+        # results = index.query(vector=[0] * DIMENSION, top_k=10000, include_metadata=True, include_values=False)
+        # return results
+        # query_vector = model.encode(query).tolist()
+        # results = index.query(query_vector, top_k=top_k, include_metadata=True)
+        # metadata_only = [{"chunk_id": match["id"], "metadata": match["metadata"]} for match in results["matches"]]
+        # return metadata_only
+
     def __del__(self):
         """Cleanup method to ensure proper resource handling."""
         try:
@@ -442,21 +439,37 @@ class AssistantTool:
             pass
 
 # # Example usage
+
+from pprint import pprint
 if __name__ == "__main__":
     assistant_tool = AssistantTool()
     # print(assistant_tool.list_indices())
 #     # print(assistant_tool._get_index('master'))
 #     assistant_tool.add_vector_to_index('transcripts', 'transcripts')
-    # assistant_tool.add_vector_to_index('corousels_txt', 'carousel')
-#     # print(assistant_tool.test_retrieval('What is the main topic of the podcasts?', 'podcast'))
-    run = True
-    test_user_id = input("enter your key: ")  # Example user ID for testing
-    while run:
-        query = input('Enter: ')
-        if query == 'q':
-            run = False
-        else:
-            print(assistant_tool.query_response(query, test_user_id))
+    # assistant_tool.add_vector_to_index(os.path.join(os.getcwd(), 
+                                                    # 'corousels_txt/'), 'carousel',
+                                                    #   metadata={'type': 'carousel'})
+    # print(assistant_tool.get_files('carousel'))
+    # pprint(assistant_tool.show_index_content('carousel'))
+
+    # print(assistant_tool.test_retrieval('What is the main topic of the podcasts?', 'podcast'))
+    print(assistant_tool.test_retrieval('Real engagement', 'carousel'))
+
+    # run = True
+    # test_user_id = input("enter your key: ")  # Example user ID for testing
+    # while run:
+    #     query = input('Enter: ')
+    #     if query.lower().replace(' ', '') == 'q':
+    #         run = False
+    #     else:
+    #         print(assistant_tool.query_response(query, test_user_id))
+    
+    # # pprint(assistant_tool.thought_process)
+    # # pprint(len(assistant_tool.thought_process))
+    
+
+    # pprint(assistant_tool.thought_process)
+    # print(len(assistant_tool.thought_process))
 
 
 
