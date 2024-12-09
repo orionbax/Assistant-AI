@@ -7,7 +7,8 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
-    <div style="position: fixed; top: 20px; left: 20px; display: flex; align-items: center; gap: 20px; z-index: 1000;">
+    <div id="overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(5px); z-index: 1000;"></div>
+    <div style="position: fixed; top: 20px; left: 20px; display: flex; align-items: center; gap: 20px; z-index: 1001;">
         <div style="background: linear-gradient(135deg, #2196F3, #4CAF50); color: white; padding: 10px 20px; border-radius: 25px; font-weight: 500; box-shadow: 0 2px 10px rgba(0,0,0,0.1); font-size: 14px; letter-spacing: 0.5px;">
             AI-Assistant
         </div>
@@ -37,10 +38,11 @@
                                                   padding: 20px;
                                                   border-radius: 10px;
                                                   box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                                                  z-index: 1001;
+                                                  z-index: 1002;
                                                   width: 70vw;
                                                   height: 70vh;
-                                                  color: #333;">
+                                                  color: #333;
+                                                  overflow-y: auto;">
             <div style="display: flex; justify-content: space-between; margin-bottom: 15px;">
                 <h3 style="margin: 0;">Refine Content</h3>
                 <button onclick="closeRefinePopup()" 
@@ -49,14 +51,33 @@
                                font-size: 18px;
                                cursor: pointer;">×</button>
             </div>
-            <!-- Add your refine content form/elements here -->
-            <div style="min-width: 300px; min-height: 200px;">
-                <!-- Content goes here -->
+            <div class="tabs">
+                <button class="tab-button" onclick="openTab(event, 'indexTab')">Index & Persona</button>
+                <button class="tab-button" onclick="openTab(event, 'uploadTab')">Upload Files</button>
+            </div>
+            <div id="indexTab" class="tab-content">
+                <label for="personaSelect" style="display: block; margin-top: 20px; margin-bottom: 10px;">Select Persona:</label>
+                <select id="personaSelect" style="width: 100%; padding: 10px; border-radius: 5px; border: 1px solid #ccc;">
+                    <option value="" disabled selected>Choose a persona...</option>
+                    <!-- Options will be populated dynamically -->
+                </select>
+                <label for="outputTypeSelect" style="display: block; margin-top: 20px; margin-bottom: 10px;">Select Output Type:</label>
+                <select id="outputTypeSelect" style="width: 100%; padding: 10px; border-radius: 5px; border: 1px solid #ccc;">
+                    <option value="" disabled selected>Choose an output type...</option>
+                    <!-- Options will be populated dynamically -->
+                </select>
+            </div>
+            <div id="uploadTab" class="tab-content" style="display: none;">
                 <label for="indexSelect" style="display: block; margin-bottom: 10px;">Select Index:</label>
                 <select id="indexSelect" style="width: 100%; padding: 10px; border-radius: 5px; border: 1px solid #ccc;">
                     <option value="" disabled selected>Choose an index...</option>
                     <!-- Options will be populated dynamically -->
                 </select>
+                <label for="fileUpload" style="display: block; margin-top: 20px; margin-bottom: 10px;">Upload Files:</label>
+                <input type="file" id="fileUpload" accept=".pdf" multiple style="width: 100%; padding: 10px; border-radius: 5px; border: 1px solid #ccc;">
+                <button id="clearAllButton" style="margin-top: 10px; padding: 10px 20px; border-radius: 5px; background-color: #f44336; color: white; border: none; cursor: pointer;">Clear All</button>
+                <ul id="fileList" style="list-style-type: none; padding: 0; margin-top: 10px; max-height: 150px; overflow-y: auto; border: 1px solid #ccc; border-radius: 5px;"></ul>
+                <button id="uploadButton" style="margin-top: 10px; padding: 10px 20px; border-radius: 5px; background-color: #2196F3; color: white; border: none; cursor: pointer;">Upload</button>
             </div>
         </div>
     </div>
@@ -72,7 +93,7 @@
     </div>
     <div class="input-container">
         <div class="input-box">
-            <textarea autofocus ="Wise words go in here..." rows="1" id="userInput" maxlength="1000"></textarea>
+            <textarea autofocus ="Wise words go in here..." rows="1" id="userInput" maxlength="1000" disabled></textarea>
             <div class="char-counter" id="charCounter">0/1000</div>
             <button class="send-button" onclick="sendMessage()" id="sendButton">
                 <svg stroke="currentColor" fill="none" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" height="1em" width="1em" xmlns="http://www.w3.org/2000/svg">
@@ -83,9 +104,7 @@
         </div>
     </div>
 
-    <script src="{{ url_for('static', filename='index.js') }}">
-        
-    </script>
+    <script src="{{ url_for('static', filename='index.js') }}"></script>
 </body>
 </html>
 

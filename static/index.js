@@ -226,11 +226,16 @@ document.getElementById('userInput').addEventListener('keypress', function(e) {
 });
 
 function openRefinePopup() {
-    const popup = document.getElementById('refinePopup');
-    if (popup) {
-        popup.style.display = 'block';
-        loadIndices(); // Load indices when the popup is opened
-    }
+    document.getElementById('refinePopup').style.display = 'block';
+    document.getElementById('overlay').style.display = 'block'; // Show overlay
+    document.getElementById('userInput').disabled = true; // Disable textarea
+    loadIndices(); // Load indices when the popup is opened
+}
+
+function closeRefinePopup() {
+    document.getElementById('refinePopup').style.display = 'none';
+    document.getElementById('overlay').style.display = 'none'; // Hide overlay
+    document.getElementById('userInput').disabled = false; // Re-enable textarea
 }
 
 async function loadIndices() {
@@ -261,11 +266,168 @@ async function loadIndices() {
     }
 }
 
-function closeRefinePopup() {
-    const popup = document.getElementById('refinePopup');
-    if (popup) {
-        popup.style.display = 'none';
-    }
+function fetchPersonas() {
+    fetch('/personas', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        const personaSelect = document.getElementById('personaSelect');
+        Object.entries(data.personas).forEach(([key, value]) => {
+            const option = document.createElement('option');
+            option.value = key;
+            option.textContent = `(${key}) ${value}`;
+            personaSelect.appendChild(option);
+        });
+    })
+    .catch(error => console.error('Error fetching personas:', error));
 }
+
+function fetchOutputTypes() {
+    fetch('/output_types', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        const outputTypeSelect = document.getElementById('outputTypeSelect');
+        data.output_types.forEach(type => {
+            const option = document.createElement('option');
+            option.value = type;
+            option.textContent = type;
+            outputTypeSelect.appendChild(option);
+        });
+    })
+    .catch(error => console.error('Error fetching output types:', error));
+}
+
+function openTab(event, tabName) {
+    const tabContents = document.getElementsByClassName('tab-content');
+    for (let i = 0; i < tabContents.length; i++) {
+        tabContents[i].style.display = 'none';
+    }
+
+    const tabButtons = document.getElementsByClassName('tab-button');
+    for (let i = 0; i < tabButtons.length; i++) {
+        tabButtons[i].className = tabButtons[i].className.replace(' active', '');
+    }
+
+    document.getElementById(tabName).style.display = 'block';
+    event.currentTarget.className += ' active';
+}
+
+// Initialize the first tab as active
+document.addEventListener('DOMContentLoaded', () => {
+    document.querySelector('.tab-button').click();
+    fetchPersonas();
+    fetchOutputTypes(); // Fetch output types when the page loads
+    toggleClearAllButton(false);
+    // Call fetchIndices or other initializations if needed
+});
+
+document.getElementById('uploadButton').addEventListener('click', function() {
+    const files = document.getElementById('fileUpload').files;
+    const index = document.getElementById('indexSelect').value.toLowerCase();
+
+    if (!index) {
+        alert('Please select an index before uploading files.');
+        return;
+    }
+
+    if (files.length === 0) {
+        alert('Please select files to upload.');
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('index', index);
+    for (let i = 0; i < files.length; i++) {
+        formData.append('files', files[i]);
+    }
+
+    fetch('/upload', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        alert(data.message || 'Files uploaded successfully.');
+    })
+    .catch(error => {
+        console.error('Error uploading files:', error);
+        alert('An error occurred while uploading files.');
+    });
+});
+
+document.getElementById('fileUpload').addEventListener('change', function() {
+    const files = Array.from(this.files);
+    updateFileList(files);
+    toggleClearAllButton(files.length > 0);
+});
+
+function updateFileList(files) {
+    const fileList = document.getElementById('fileList');
+    fileList.innerHTML = ''; // Clear the list
+
+    files.forEach((file, index) => {
+        const listItem = document.createElement('li');
+        listItem.style.display = 'flex';
+        listItem.style.justifyContent = 'space-between';
+        listItem.style.alignItems = 'center';
+        listItem.style.padding = '5px 0';
+        listItem.style.borderBottom = '1px solid #ccc';
+
+        const fileName = document.createElement('span');
+        fileName.textContent = file.name;
+
+        const removeButton = document.createElement('button');
+        removeButton.textContent = '×';
+        removeButton.style.marginLeft = '10px';
+        removeButton.style.backgroundColor = '#f44336';
+        removeButton.style.color = 'white';
+        removeButton.style.border = 'none';
+        removeButton.style.borderRadius = '50%';
+        removeButton.style.width = '24px';
+        removeButton.style.height = '24px';
+        removeButton.style.display = 'flex';
+        removeButton.style.alignItems = 'center';
+        removeButton.style.justifyContent = 'center';
+        removeButton.style.cursor = 'pointer';
+        removeButton.onclick = () => {
+            files.splice(index, 1);
+            updateFileList(files);
+            toggleClearAllButton(files.length > 0);
+        };
+
+        listItem.appendChild(fileName);
+        listItem.appendChild(removeButton);
+        fileList.appendChild(listItem);
+    });
+
+    // Update the file input with the new file list
+    updateFileInput(files);
+}
+
+function updateFileInput(files) {
+    const dataTransfer = new DataTransfer();
+    files.forEach(file => dataTransfer.items.add(file));
+    document.getElementById('fileUpload').files = dataTransfer.files;
+}
+
+function toggleClearAllButton(show) {
+    const clearAllButton = document.getElementById('clearAllButton');
+    clearAllButton.style.display = show ? 'block' : 'none';
+}
+
+document.getElementById('clearAllButton').addEventListener('click', function() {
+    document.getElementById('fileList').innerHTML = '';
+    document.getElementById('fileUpload').value = ''; // Clear the file input
+    toggleClearAllButton(false);
+});
 
 // Ensure this script is correctly linked in your HTML and that there are no JavaScript errors in the console.

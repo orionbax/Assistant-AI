@@ -70,7 +70,25 @@ def list_indices():
         return jsonify({'error': f'Error retrieving indices: {str(e)}'}), 500
 
 
+# Return persona
+@app.route('/personas', methods=['POST'])
+def get_personas():
+    """Return list of available personas."""
+    try:
+        personas = assistant_tool.get_personas()
+        return jsonify({'personas': personas}), 200
+    except Exception as e:
+        return jsonify({'error': f'Error retrieving personas: {str(e)}'}), 500
 
+@app.route('/output_types', methods=['POST'])
+def get_output_types():
+    """Return a list of output types"""
+    try:
+        output_types = assistant_tool.get_output_types()
+        return jsonify({'output_types': output_types})
+    except Exception as err:
+        return jsonify([f'error in fetching output types! {err}'])
+    
 
 @app.route('/upload', methods=['POST'])
 def upload_files():

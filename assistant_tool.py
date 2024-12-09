@@ -16,7 +16,7 @@ from typing import Dict
 import regex
 import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-
+from utilities import *
 # from langchain_core.tools import tool
 from  langchain.tools import Tool
 #ONLY ASCII READABLE STRING CAN BE USED AS A NAMESPACE SO WHEN 
@@ -97,30 +97,26 @@ class AssistantTool:
             chunk_overlap=chunk_overlap
         )
         chunks = text_splitter.split_documents(docs)
-        
         if metadata:
             for chunk in chunks:
                 # Preserve existing metadata and merge with new metadata
                 chunk.metadata = {**chunk.metadata, **metadata}
-                # directory = os.path.dirname(chunk.metadata['source'])
-                # file_name = os.path.basename(chunk.metadata['source'])
-                # # chunk.metadata['namespace'] = file_name # to delete specific file from index
-                # chunk.metadata['namespace'] = file_name 
         return chunks
 
     def read_doc(self, directory):
         """Load documents from a directory."""
         return PyPDFDirectoryLoader(directory).load()
 
-    def add_vector_to_index(self, content_type, metadata=None):
-        directory = os.path.join('platform_specific_documents/', content_type)
+    def add_vector_to_index(self, directory=None, content_type=None, metadata=None, documents=None):
+        # directory = os.path.join('platform_specific_documents/', content_type)
         print(f'directory: {directory}')
         """Add documents to the vector store based on content type."""
         if content_type not in ['carousel', 'podcast']:
             raise ValueError("content_type must be either 'carousel' or 'podcast'")
         
         # Read and chunk the documents
-        documents = self.chunk_data(self.read_doc(directory), metadata=metadata)
+        if not documents:
+            documents = self.chunk_data(self.read_doc(directory), metadata=metadata)
         print(len(documents))
         upsert_data = []
         count = 0
@@ -146,8 +142,8 @@ class AssistantTool:
         for doc_id, vector, metadata in upsert_data:
             file_name = os.path.basename(metadata['source'])
             # Sanitize the namespace to ensure it contains only ASCII-printable characters
-            sanitized_namespace = ''.join(c for c in file_name if c.isprintable() and ord(c) < 128)
-            index.upsert(vectors=[(doc_id, vector, metadata)], show_progress=True, namespace=sanitized_namespace)
+            # sanitized_namespace = ''.join(c for c in file_name if c.isprintable() and ord(c) < 128)
+            index.upsert(vectors=[(doc_id, vector, metadata)], show_progress=True)#, namespace=sanitized_namespace)
 
     def delete_index_content(self, index_name):
         """Delete all contents from an index."""
@@ -156,15 +152,35 @@ class AssistantTool:
             index.delete(delete_all=True)
             return True
         return False
-    def delete_file_from_index(self, index_name, namespace):
+    
+    def delete_file_from_index(self, index_name, file_names: list):
         """Delete a specific file from an index."""
         index = self.pinecone.Index(index_name)
-        sanitized_namespace = ''.join(c for c in namespace if c.isprintable() and ord(c) < 128)
-        # index.delete(delete_all=True,namespace=sanitized_namespace)
-        # test deletion with metadata 
+        query_response = index.query(
+            vector=[0] * DIMENSION,
+            top_k=10000,
+            include_values=False,
+            include_metadata=True
+        )
+        pprint(query_response)
         
-    def show_index_content(self, index_name, namespace=None):
-        """Display all vectors and metadata from an index."""
+        # Get IDs of vectors where metadata source matches file_name
+        for file_name in file_names:
+            ids_to_delete = [
+                match.id for match in query_response.matches 
+                if os.path.basename(match.metadata['source']) == file_name
+            ]
+        
+        # Delete vectors in batches if any matches found
+        print(len(ids_to_delete))
+        if ids_to_delete:
+            index.delete(ids=ids_to_delete)
+            return True
+        return False
+
+        
+    def show_index_content(self, index_name):#, namespace=None):
+        """Display metadata of all files from an index."""
         try:
             if index_name not in self.pinecone.list_indexes().names():
                 return
@@ -175,21 +191,12 @@ class AssistantTool:
                 top_k=10000 ,
                 include_values=False,
                 include_metadata=True,
-                # namespace=namespace
+                # namespace="Finding Your Niche.pdf"
             )
-            response = query_response.matches
-            file_names = set()
-            for match in response:
-                file_names.add(match.metadata['source'])
-            documents = [self._get_file(file, index_name)[0].page_content[:1000] for file in file_names]
-            # print(documents)
-            print(len(documents))
-            return documents
 
-            # if not query_response.matches:
-            #     return
-            
-            # return query_response.matches
+            response = query_response.matches
+            response = [(m['id'], m['metadata']['source']) for m in response]
+            return response
             
         except Exception as e:
             raise RuntimeError(f"Error retrieving index content: {e}")
@@ -219,9 +226,17 @@ class AssistantTool:
                 search_kwargs={"k": 2}
             )
             response = retriever.invoke(query)
-            documents = [self._get_file(document.metadata['source'], 'carousel') for document in response]
-            print([document.metadata['source'] for document in response])
-            print(len(documents))
+            # pprint(response)
+            # documents = [self._get_file(document.metadata['source'], 'carousel') for document in response]
+            documents = []
+            for document in response:
+                full_doc = self.chunk_data(self._get_file(document.metadata['source'], 'carousel'))
+                page_num = int(document.metadata.get('page', 0))
+                if 0 <= page_num < len(full_doc):
+                    documents.append(full_doc[page_num])
+                    
+            # print([document.metadata['source'] for document in response])
+            # print(len(documents))
 
             return documents
         except Exception as e:
@@ -238,9 +253,12 @@ class AssistantTool:
                 search_kwargs={"k": 2}
             )
             response = retriever.invoke(query)
-            documents = [self._get_file(document.metadata['source'], 'podcast') for document in response]
-            print([document.metadata['source'] for document in response])
-            print(len(documents))
+            documents = []
+            for document in response:
+                full_doc = self.chunk_data(self._get_file(document.metadata['source'], 'podcast'))
+                page_num = int(document.metadata.get('page', 0))
+                if 0 <= page_num < len(full_doc):
+                    documents.append(full_doc[page_num])
 
             return documents
         except Exception as e:
@@ -338,6 +356,14 @@ class AssistantTool:
         """Retrieve the conversation history for a specific user."""
         return self.conversation_histories.get(user_id, [])
 
+    def get_personas(self):
+        """Return list of available personas."""
+        return personas
+    
+    def get_output_types(self) -> list:
+        """Return list of available output types"""
+        return output_types
+
     def generate_user_id(self) -> str:
         """Generate a unique user ID."""
         return str(uuid4())
@@ -372,13 +398,13 @@ class AssistantTool:
     def query_response(self, query: str, 
                        user_id: str, 
                        persona: str = personas['joker'], 
-                       tone: str = tones['funny'], 
                        out_put_type: str = None
+
                        ):
         """Process a query and return the response in JSON format."""
         try:
             print(f'persona: {persona}')
-            print(f'tone: {tone}')
+            # print(f'tone: {tone}')
             encoder = encoding_for_model(MODEL_NAME)
             try:
                 query_tokens = len(encoder.encode(query))
@@ -395,7 +421,7 @@ class AssistantTool:
                         'input': query,
                         'conversation_history': self.format_conversation_history(user_id),
                         'persona': persona,
-                        'tone': tone,
+                        # 'tone': tone,
                     }
                 )
                 try:
@@ -477,6 +503,11 @@ class AssistantTool:
             print(f"Error listing indices: {e}")
             return []
 
+    def _add_file(self, path, index_name):
+        file = PyPDFLoader(path).load()
+        file[0].page_content = ""
+        self.add_vector_to_index(documents=file, content_type=index_name, metadata={'type': index_name})
+
     def _get_file(self, file_name, content_type):
         """Get all metadata and namespaces in a given index.
         
@@ -486,10 +517,14 @@ class AssistantTool:
         Returns:
             dict: Dictionary containing stats, metadata and namespaces
         """
-        directory = os.path.dirname(file_name)
         file_name = os.path.basename(file_name)
-        file_name = file_name.replace('EP 79_ SoundHub & SoundInvest Script-1.pdf', 'EP 79_ SoundHub & SoundInvest Script.pdf')
         full_path = os.path.join('platform_specific_documents', content_type, file_name)
+
+        if not os.path.isfile(full_path):
+            raise FileNotFoundError(f"File does not exist at path: {full_path}")
+        print(file_name)
+        # file_name = file_name.replace('EP 79_ SoundHub & SoundInvest Script-1.pdf', 'EP 79_ SoundHub & SoundInvest Script.pdf')
+        
         # print(full_path)
         try:
             return PyPDFLoader(full_path).load()
@@ -513,38 +548,18 @@ class AssistantTool:
 from pprint import pprint
 if __name__ == "__main__":
     assistant_tool = AssistantTool()
-    
-    
-    # assistant_tool.add_vector_to_index('carousel',
-    #                                     metadata={'type': 'carousel'})
-
-    # assistant_tool.add_vector_to_index('podcast',
-    #                                     metadata={'type': 'podcast'})
-
-
-    # print(assistant_tool.test_retrieval('What is the main topic of the podcasts?', 'podcast'))
-    # print(assistant_tool.test_retrieval('Real engagement', 'carousel'))
-    # print(assistant_tool.carousel_retriever_tool())
-    # print(assistant_tool._get_file('Finding Your Niche.pdf'))
-
-    # print(assistant_tool.query_response("Need a content about Real Engagement?", '1'))
-
-    # print(assistant_tool.query_response("What is the main topic of the podcasts?", '1'))
     # pprint(assistant_tool.show_index_content('carousel'))
-
-    # run = True
-    # test_user_id = input("enter your key: ")  # Example user ID for testing
-    # while run:
-    #     query = input('Enter: ')
-    #     if query.lower().replace(' ', '') == 'q':
-    #         run = False
-    #     else:
-    #         print(assistant_tool.query_response(query, test_user_id))
-    
-    # pprint(assistant_tool.thought_process)
-    # pprint(len(assistant_tool.thought_process))
-
-    assistant_tool.delete_file_from_index('carousel', 'Real engagement .pdf')   
+    # pprint(assistant_tool.carousel_retriever_tool('Real engagement'))
+    # assistant_tool._add_file(os.path.join('platform_specific_documents/', "carousel",'Real engagement .pdf'), 'carousel')
+    # assistant_tool.add_vector_to_index(os.path.join('platform_specific_documents/', "podcast"),'podcast',metadata={'type': 'podcast'})
+    run = False
+    while run:
+        query = input('Enter: ')
+        if query.lower().replace(' ', '') == 'q':
+            run = False
+        else:
+            print(assistant_tool.query_response(query, '1'))
     print('done~')
+
 
 
